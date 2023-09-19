@@ -21,9 +21,7 @@ use near_primitives::errors::InvalidTxError;
 use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::{Action, SignedTransaction};
 use near_primitives::types::{BlockReference, Finality, Nonce};
-use near_primitives::views::{
-    AccessKeyView, BlockView, CallResult, FinalExecutionOutcomeView, QueryRequest,
-};
+use near_primitives::views::{AccessKeyView, BlockView, FinalExecutionOutcomeView, QueryRequest};
 
 pub mod error;
 
