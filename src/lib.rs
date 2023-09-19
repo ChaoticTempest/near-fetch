@@ -2,6 +2,8 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use tokio::sync::RwLock;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
@@ -19,7 +21,9 @@ use near_primitives::errors::InvalidTxError;
 use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::{Action, SignedTransaction};
 use near_primitives::types::{BlockReference, Finality, Nonce};
-use near_primitives::views::{AccessKeyView, BlockView, FinalExecutionOutcomeView, QueryRequest};
+use near_primitives::views::{
+    AccessKeyView, BlockView, CallResult, FinalExecutionOutcomeView, QueryRequest,
+};
 
 pub mod error;
 
@@ -49,6 +53,15 @@ impl Client {
         }
     }
 
+    /// Construct a [`Client`] from an existing [`JsonRpcClient`].
+    pub fn from_client(client: JsonRpcClient) -> Self {
+        Self {
+            rpc_addr: client.server_addr().to_string(),
+            rpc_client: client,
+            access_key_nonces: RwLock::new(HashMap::new()),
+        }
+    }
+
     /// The RPC address the client is connected to.
     pub fn rpc_addr(&self) -> String {
         self.rpc_addr.clone()
@@ -61,7 +74,70 @@ impl Client {
         receiver_id: &AccountId,
         actions: Vec<Action>,
     ) -> Result<FinalExecutionOutcomeView> {
-        send_tx(self, signer, receiver_id, actions).await
+        let cache_key = (signer.account_id.clone(), signer.public_key());
+
+        retry(|| async {
+            let (block_hash, nonce) = fetch_tx_nonce(self, &cache_key).await?;
+            let result = self
+                .rpc_client
+                .call(&RpcBroadcastTxCommitRequest {
+                    signed_transaction: SignedTransaction::from_actions(
+                        nonce,
+                        signer.account_id.clone(),
+                        receiver_id.clone(),
+                        signer as &dyn Signer,
+                        actions.clone(),
+                        block_hash,
+                    ),
+                })
+                .await;
+
+            // InvalidNonce, cached nonce is potentially very far behind, so invalidate it.
+            if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+                RpcTransactionError::InvalidTransaction {
+                    context: InvalidTxError::InvalidNonce { .. },
+                    ..
+                },
+            ))) = &result
+            {
+                let mut nonces = self.access_key_nonces.write().await;
+                nonces.remove(&cache_key);
+            }
+
+            result.map_err(Into::into)
+        })
+        .await
+    }
+
+    /// View into a function.
+    pub async fn view<T: Serialize, R: DeserializeOwned>(
+        &self,
+        receiver_id: &AccountId,
+        function_name: &str,
+        args: T,
+    ) -> Result<R> {
+        let args = match serde_json::to_vec(&args) {
+            Ok(args) => args,
+            Err(e) => return Err(Error::SerializeError(e)),
+        };
+
+        let resp = self
+            .rpc_client
+            .call(RpcQueryRequest {
+                block_reference: Finality::Final.into(),
+                request: QueryRequest::CallFunction {
+                    account_id: receiver_id.clone(),
+                    method_name: function_name.into(),
+                    args: args.into(),
+                },
+            })
+            .await?;
+
+        let QueryResponseKind::CallResult(resp) = resp.kind else {
+            return Err(Error::RpcReturnedInvalidData("while querying account"));
+        };
+
+        Ok(serde_json::from_slice(&resp.result)?)
     }
 
     /// Fetches the access key for the given account ID and public key.
@@ -95,47 +171,6 @@ impl Client {
             .await
             .map_err(Into::into)
     }
-}
-
-async fn send_tx(
-    client: &Client,
-    signer: &InMemorySigner,
-    receiver_id: &AccountId,
-    actions: Vec<Action>,
-) -> Result<FinalExecutionOutcomeView> {
-    let cache_key = (signer.account_id.clone(), signer.public_key());
-
-    retry(|| async {
-        let (block_hash, nonce) = fetch_tx_nonce(client, &cache_key).await?;
-        let result = client
-            .rpc_client
-            .call(&RpcBroadcastTxCommitRequest {
-                signed_transaction: SignedTransaction::from_actions(
-                    nonce,
-                    signer.account_id.clone(),
-                    receiver_id.clone(),
-                    signer as &dyn Signer,
-                    actions.clone(),
-                    block_hash,
-                ),
-            })
-            .await;
-
-        // InvalidNonce, cached nonce is potentially very far behind, so invalidate it.
-        if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
-            RpcTransactionError::InvalidTransaction {
-                context: InvalidTxError::InvalidNonce { .. },
-                ..
-            },
-        ))) = &result
-        {
-            let mut nonces = client.access_key_nonces.write().await;
-            nonces.remove(&cache_key);
-        }
-
-        result.map_err(Into::into)
-    })
-    .await
 }
 
 async fn cached_nonce(nonce: &AtomicU64, client: &Client) -> Result<(CryptoHash, Nonce)> {

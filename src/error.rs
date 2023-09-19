@@ -14,7 +14,9 @@ pub enum Error {
     RpcQueryError(#[from] JsonRpcError<RpcQueryError>),
     #[error(transparent)]
     RpcTransactionError(#[from] JsonRpcError<RpcTransactionError>),
-
     #[error("invalid data returned: {0}")]
     RpcReturnedInvalidData(&'static str),
+
+    #[error(transparent)]
+    SerializeError(#[from] serde_json::Error),
 }
