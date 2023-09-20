@@ -32,7 +32,6 @@ pub type CacheKey = (AccountId, PublicKey);
 
 /// Client that implements exponential retrying and caching of access key nonces.
 pub struct Client {
-    rpc_addr: String,
     rpc_client: JsonRpcClient,
     /// AccessKey nonces to reference when sending transactions.
     access_key_nonces: RwLock<HashMap<CacheKey, AtomicU64>>,
@@ -43,18 +42,12 @@ impl Client {
     pub fn new(rpc_addr: &str) -> Self {
         let connector = JsonRpcClient::new_client();
         let rpc_client = connector.connect(rpc_addr);
-
-        Self {
-            rpc_client,
-            rpc_addr: rpc_addr.into(),
-            access_key_nonces: RwLock::new(HashMap::new()),
-        }
+        Self::from_client(rpc_client)
     }
 
     /// Construct a [`Client`] from an existing [`JsonRpcClient`].
     pub fn from_client(client: JsonRpcClient) -> Self {
         Self {
-            rpc_addr: client.server_addr().to_string(),
             rpc_client: client,
             access_key_nonces: RwLock::new(HashMap::new()),
         }
@@ -62,7 +55,7 @@ impl Client {
 
     /// The RPC address the client is connected to.
     pub fn rpc_addr(&self) -> String {
-        self.rpc_addr.clone()
+        self.rpc_client.server_addr().into()
     }
 
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network.
@@ -132,7 +125,7 @@ impl Client {
             .await?;
 
         let QueryResponseKind::CallResult(resp) = resp.kind else {
-            return Err(Error::RpcReturnedInvalidData("while querying account"));
+            return Err(Error::RpcReturnedInvalidData("while querying view"));
         };
 
         Ok(serde_json::from_slice(&resp.result)?)
@@ -214,5 +207,5 @@ where
     // Exponential backoff starting w/ 5ms for maximum retry of 4 times with the following delays:
     //   5, 25, 125, 625 ms
     let retry_strategy = ExponentialBackoff::from_millis(5).map(jitter).take(4);
-    Retry::spawn(retry_strategy.clone(), task).await
+    Retry::spawn(retry_strategy, task).await
 }
