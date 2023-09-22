@@ -17,11 +17,13 @@ use near_jsonrpc_client::methods::query::RpcQueryRequest;
 use near_jsonrpc_client::JsonRpcClient;
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
-use near_primitives::errors::InvalidTxError;
+use near_primitives::errors::{ActionError, ActionErrorKind, InvalidTxError, TxExecutionError};
 use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::{Action, SignedTransaction};
 use near_primitives::types::{BlockReference, Finality, Nonce};
-use near_primitives::views::{AccessKeyView, BlockView, FinalExecutionOutcomeView, QueryRequest};
+use near_primitives::views::{
+    AccessKeyView, BlockView, FinalExecutionOutcomeView, FinalExecutionStatus, QueryRequest,
+};
 
 pub mod error;
 
@@ -83,18 +85,7 @@ impl Client {
                 })
                 .await;
 
-            // InvalidNonce, cached nonce is potentially very far behind, so invalidate it.
-            if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
-                RpcTransactionError::InvalidTransaction {
-                    context: InvalidTxError::InvalidNonce { .. },
-                    ..
-                },
-            ))) = &result
-            {
-                let mut nonces = self.access_key_nonces.write().await;
-                nonces.remove(&cache_key);
-            }
-
+            self.check_and_invalidate_cache(&cache_key, &result).await;
             result.map_err(Into::into)
         })
         .await
@@ -161,6 +152,46 @@ impl Client {
             .call(&RpcBlockRequest { block_reference })
             .await
             .map_err(Into::into)
+    }
+
+    async fn check_and_invalidate_cache(
+        &self,
+        cache_key: &CacheKey,
+        result: &Result<FinalExecutionOutcomeView, JsonRpcError<RpcTransactionError>>,
+    ) {
+        // InvalidNonce, cached nonce is potentially very far behind, so invalidate it.
+        if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+            RpcTransactionError::InvalidTransaction {
+                context: InvalidTxError::InvalidNonce { .. },
+                ..
+            },
+        ))) = result
+        {
+            self.invalidate_cache(cache_key).await;
+        }
+
+        let Ok(outcome) = result else {
+            return;
+        };
+        let FinalExecutionStatus::Failure(tx_err) = &outcome.status else {
+            return;
+        };
+
+        let invalid_cache = matches!(
+            tx_err,
+            TxExecutionError::ActionError(ActionError {
+                kind: ActionErrorKind::DelegateActionInvalidNonce { .. },
+                ..
+            }) | TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce { .. })
+        );
+        if invalid_cache {
+            self.invalidate_cache(cache_key).await;
+        }
+    }
+
+    async fn invalidate_cache(&self, cache_key: &CacheKey) {
+        let mut nonces = self.access_key_nonces.write().await;
+        nonces.remove(cache_key);
     }
 }
 
