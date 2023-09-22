@@ -21,7 +21,7 @@ use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::errors::{ActionError, ActionErrorKind, InvalidTxError, TxExecutionError};
 use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::{Action, SignedTransaction};
-use near_primitives::types::{BlockReference, Finality, Nonce};
+use near_primitives::types::{BlockHeight, BlockReference, Finality, Nonce};
 use near_primitives::views::{
     AccessKeyView, BlockView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus,
     QueryRequest,
@@ -130,8 +130,8 @@ impl Client {
         &self,
         account_id: &AccountId,
         public_key: &PublicKey,
-    ) -> Result<(AccessKeyView, CryptoHash)> {
-        let query_resp = self
+    ) -> Result<(AccessKeyView, CryptoHash, BlockHeight)> {
+        let resp = self
             .rpc_client
             .call(&RpcQueryRequest {
                 // Finality::None => Optimistic query for access key
@@ -143,8 +143,10 @@ impl Client {
             })
             .await?;
 
-        match query_resp.kind {
-            QueryResponseKind::AccessKey(access_key) => Ok((access_key, query_resp.block_hash)),
+        match resp.kind {
+            QueryResponseKind::AccessKey(access_key) => {
+                Ok((access_key, resp.block_hash, resp.block_height))
+            }
             _ => Err(Error::RpcReturnedInvalidData("while querying access key")),
         }
     }
@@ -240,7 +242,7 @@ async fn fetch_tx_nonce(client: &Client, cache_key: &CacheKey) -> Result<(Crypto
             // Write the cached value. This value will get invalidated when an InvalidNonce error is returned.
             Entry::Vacant(entry) => {
                 let (account_id, public_key) = entry.key();
-                let (access_key, block_hash) = client.access_key(account_id, public_key).await?;
+                let (access_key, block_hash, _) = client.access_key(account_id, public_key).await?;
                 entry.insert(AtomicU64::new(access_key.nonce + 1));
                 Ok((block_hash, access_key.nonce + 1))
             }
