@@ -1,6 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -30,16 +31,28 @@ use near_primitives::views::{
 pub mod error;
 pub mod signer;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
+
+pub use crate::error::Error;
 
 /// Cache key for access key nonces.
 pub type CacheKey = (AccountId, PublicKey);
 
 /// Client that implements exponential retrying and caching of access key nonces.
+#[derive(Debug)]
 pub struct Client {
     rpc_client: JsonRpcClient,
     /// AccessKey nonces to reference when sending transactions.
-    access_key_nonces: RwLock<HashMap<CacheKey, AtomicU64>>,
+    access_key_nonces: Arc<RwLock<HashMap<CacheKey, AtomicU64>>>,
+}
+
+impl Clone for Client {
+    fn clone(&self) -> Self {
+        Self {
+            rpc_client: self.rpc_client.clone(),
+            access_key_nonces: self.access_key_nonces.clone(),
+        }
+    }
 }
 
 impl Client {
@@ -54,7 +67,7 @@ impl Client {
     pub fn from_client(client: JsonRpcClient) -> Self {
         Self {
             rpc_client: client,
-            access_key_nonces: RwLock::new(HashMap::new()),
+            access_key_nonces: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
