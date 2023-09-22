@@ -6,5 +6,6 @@ High level rust client library for sending transactions into the NEAR chain. Thi
 
 - Retrying transactions with exponential backoff.
 - When sending transactions, the nonces are cached and invalidated locally as to avoid querying for them everytime we need to make a transaction.
+- `KeyRotatingSigner` for switching between keys on each sign point.
 
 NOTE: this is currently not a complete replacement for near-jsonrpc-client-rs as this is more for transactions and not every single possible RPC method that you can make.

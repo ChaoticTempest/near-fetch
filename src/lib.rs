@@ -27,6 +27,7 @@ use near_primitives::views::{
 };
 
 pub mod error;
+pub mod signer;
 
 use crate::error::{Error, Result};
 

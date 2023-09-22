@@ -19,4 +19,6 @@ pub enum Error {
 
     #[error(transparent)]
     SerializeError(#[from] serde_json::Error),
+    #[error("invalid args were passed: {0}")]
+    InvalidArgs(&'static str),
 }
