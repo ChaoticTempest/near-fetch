@@ -37,13 +37,14 @@ impl KeyRotatingSigner {
         }
     }
 
-    fn current_signer(&self) -> &InMemorySigner {
+    /// Fetches the current signer in the key rotation.
+    pub fn current_signer(&self) -> &InMemorySigner {
         &self.signers[self.counter.load(Ordering::SeqCst) % self.signers.len()]
     }
 
     // TODO: implement key rotation strategy injection?
     /// Fetches the current signer and rotates to the next one.
-    fn fetch_and_rotate_signer(&self) -> &InMemorySigner {
+    pub fn fetch_and_rotate_signer(&self) -> &InMemorySigner {
         // note: overflow will just wrap on atomics:
         let idx = self.counter.fetch_add(1, Ordering::SeqCst);
         &self.signers[idx % self.signers.len()]
@@ -61,5 +62,22 @@ impl Signer for KeyRotatingSigner {
 
     fn compute_vrf_with_proof(&self, data: &[u8]) -> (vrf::Value, vrf::Proof) {
         self.current_signer().compute_vrf_with_proof(data)
+    }
+}
+
+/// A trait for exposing the account id of any object.
+pub trait ExposeAccountId {
+    fn account_id(&self) -> &AccountId;
+}
+
+impl ExposeAccountId for InMemorySigner {
+    fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+}
+
+impl ExposeAccountId for KeyRotatingSigner {
+    fn account_id(&self) -> &AccountId {
+        self.current_signer().account_id()
     }
 }

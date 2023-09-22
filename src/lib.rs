@@ -4,12 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use signer::ExposeAccountId;
 use tokio::sync::RwLock;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
 
 use near_account_id::AccountId;
-use near_crypto::{InMemorySigner, PublicKey, Signer};
+use near_crypto::{PublicKey, Signer};
 use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
 use near_jsonrpc_client::methods::block::RpcBlockRequest;
 use near_jsonrpc_client::methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest;
@@ -63,13 +64,13 @@ impl Client {
     }
 
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network.
-    pub async fn send_tx(
+    pub async fn send_tx<T: Signer + ExposeAccountId>(
         &self,
-        signer: &InMemorySigner,
+        signer: &T,
         receiver_id: &AccountId,
         actions: Vec<Action>,
     ) -> Result<FinalExecutionOutcomeView> {
-        let cache_key = (signer.account_id.clone(), signer.public_key());
+        let cache_key = (signer.account_id().clone(), signer.public_key());
 
         retry(|| async {
             let (block_hash, nonce) = fetch_tx_nonce(self, &cache_key).await?;
@@ -78,7 +79,7 @@ impl Client {
                 .call(&RpcBroadcastTxCommitRequest {
                     signed_transaction: SignedTransaction::from_actions(
                         nonce,
-                        signer.account_id.clone(),
+                        signer.account_id().clone(),
                         receiver_id.clone(),
                         signer as &dyn Signer,
                         actions.clone(),
