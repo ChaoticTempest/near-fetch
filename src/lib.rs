@@ -22,7 +22,8 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::{Action, SignedTransaction};
 use near_primitives::types::{BlockReference, Finality, Nonce};
 use near_primitives::views::{
-    AccessKeyView, BlockView, FinalExecutionOutcomeView, FinalExecutionStatus, QueryRequest,
+    AccessKeyView, BlockView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus,
+    QueryRequest,
 };
 
 pub mod error;
@@ -173,19 +174,17 @@ impl Client {
         let Ok(outcome) = result else {
             return;
         };
-        let FinalExecutionStatus::Failure(tx_err) = &outcome.status else {
-            return;
-        };
-
-        let invalid_cache = matches!(
-            tx_err,
-            TxExecutionError::ActionError(ActionError {
-                kind: ActionErrorKind::DelegateActionInvalidNonce { .. },
-                ..
-            }) | TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce { .. })
-        );
-        if invalid_cache {
-            self.invalidate_cache(cache_key).await;
+        for tx_err in fetch_tx_errs(outcome).await {
+            let invalid_cache = matches!(
+                tx_err,
+                TxExecutionError::ActionError(ActionError {
+                    kind: ActionErrorKind::DelegateActionInvalidNonce { .. },
+                    ..
+                }) | TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce { .. })
+            );
+            if invalid_cache {
+                self.invalidate_cache(cache_key).await;
+            }
         }
     }
 
@@ -193,6 +192,23 @@ impl Client {
         let mut nonces = self.access_key_nonces.write().await;
         nonces.remove(cache_key);
     }
+}
+
+async fn fetch_tx_errs(result: &FinalExecutionOutcomeView) -> Vec<&TxExecutionError> {
+    let mut failures = Vec::new();
+
+    if let FinalExecutionStatus::Failure(tx_err) = &result.status {
+        failures.push(tx_err);
+    }
+    if let ExecutionStatusView::Failure(tx_err) = &result.transaction_outcome.outcome.status {
+        failures.push(tx_err);
+    }
+    for receipt in &result.receipts_outcome {
+        if let ExecutionStatusView::Failure(tx_err) = &receipt.outcome.status {
+            failures.push(tx_err);
+        }
+    }
+    failures
 }
 
 async fn cached_nonce(nonce: &AtomicU64, client: &Client) -> Result<(CryptoHash, Nonce)> {
