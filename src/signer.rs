@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use near_account_id::AccountId;
 use near_crypto::{vrf, InMemorySigner, PublicKey, SecretKey, Signature, Signer};
@@ -8,8 +9,8 @@ use crate::error::{Error, Result};
 /// A key rotating in memory signer, that will rotate the key used for signing on
 /// each call to [`Signer::sign`].
 pub struct KeyRotatingSigner {
-    signers: Vec<InMemorySigner>,
-    counter: AtomicUsize,
+    signers: Arc<Vec<InMemorySigner>>,
+    counter: Arc<AtomicUsize>,
 }
 
 impl KeyRotatingSigner {
@@ -32,8 +33,8 @@ impl KeyRotatingSigner {
 
     pub fn from_signers(iterable: impl IntoIterator<Item = InMemorySigner>) -> Self {
         Self {
-            signers: iterable.into_iter().collect(),
-            counter: AtomicUsize::new(0),
+            signers: Arc::new(iterable.into_iter().collect()),
+            counter: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -48,6 +49,19 @@ impl KeyRotatingSigner {
         // note: overflow will just wrap on atomics:
         let idx = self.counter.fetch_add(1, Ordering::SeqCst);
         &self.signers[idx % self.signers.len()]
+    }
+
+    pub fn public_key(&self) -> &PublicKey {
+        &self.current_signer().public_key
+    }
+}
+
+impl Clone for KeyRotatingSigner {
+    fn clone(&self) -> Self {
+        Self {
+            signers: self.signers.clone(),
+            counter: self.counter.clone(),
+        }
     }
 }
 
