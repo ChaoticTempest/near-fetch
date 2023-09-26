@@ -172,7 +172,7 @@ impl Client {
             .map_err(Into::into)
     }
 
-    async fn check_and_invalidate_cache(
+    pub async fn check_and_invalidate_cache(
         &self,
         cache_key: &CacheKey,
         result: &Result<FinalExecutionOutcomeView, JsonRpcError<RpcTransactionError>>,
@@ -205,7 +205,7 @@ impl Client {
         }
     }
 
-    async fn invalidate_cache(&self, cache_key: &CacheKey) {
+    pub async fn invalidate_cache(&self, cache_key: &CacheKey) {
         let mut nonces = self.access_key_nonces.write().await;
         nonces.remove(cache_key);
     }
