@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use signer::ExposeAccountId;
 use tokio::sync::RwLock;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
@@ -32,6 +31,7 @@ pub mod error;
 pub mod signer;
 
 use crate::error::Result;
+use crate::signer::ExposeAccountId;
 
 pub use crate::error::Error;
 
@@ -51,6 +51,7 @@ impl Clone for Client {
         Self {
             rpc_client: self.rpc_client.clone(),
             access_key_nonces: self.access_key_nonces.clone(),
+            // access_key_nonces: Default::default(),
         }
     }
 }
@@ -86,7 +87,7 @@ impl Client {
         let cache_key = (signer.account_id().clone(), signer.public_key());
 
         retry(|| async {
-            let (block_hash, nonce) = fetch_tx_nonce(self, &cache_key).await?;
+            let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
             let result = self
                 .rpc_client
                 .call(&RpcBroadcastTxCommitRequest {
@@ -136,6 +137,17 @@ impl Client {
         };
 
         Ok(serde_json::from_slice(&resp.result)?)
+    }
+
+    /// Fetches the nonce associated to the account id and public key, which essentially is the
+    /// access key for the given account ID and public key. Utilize caching underneath to
+    /// prevent querying for the same access key multiple times.
+    pub async fn fetch_nonce(
+        &self,
+        account_id: &AccountId,
+        public_key: &PublicKey,
+    ) -> Result<(Nonce, CryptoHash, BlockHeight)> {
+        fetch_nonce(self, account_id, public_key).await
     }
 
     /// Fetches the access key for the given account ID and public key.
@@ -228,26 +240,33 @@ async fn fetch_tx_errs(result: &FinalExecutionOutcomeView) -> Vec<&TxExecutionEr
     failures
 }
 
-async fn cached_nonce(nonce: &AtomicU64, client: &Client) -> Result<(CryptoHash, Nonce)> {
+async fn cached_nonce(
+    nonce: &AtomicU64,
+    client: &Client,
+) -> Result<(Nonce, CryptoHash, BlockHeight)> {
     let nonce = nonce.fetch_add(1, Ordering::SeqCst);
 
     // Fetch latest block_hash since the previous one is now invalid for new transactions:
     let block = client.view_block(Finality::Final.into()).await?;
-    let block_hash = block.header.hash;
-    Ok((block_hash, nonce + 1))
+    Ok((nonce + 1, block.header.hash, block.header.height))
 }
 
 /// Fetches the transaction nonce and block hash associated to the access key. Internally
 /// caches the nonce as to not need to query for it every time, and ending up having to run
 /// into contention with others.
-async fn fetch_tx_nonce(client: &Client, cache_key: &CacheKey) -> Result<(CryptoHash, Nonce)> {
+async fn fetch_nonce(
+    client: &Client,
+    account_id: &AccountId,
+    public_key: &PublicKey,
+) -> Result<(Nonce, CryptoHash, BlockHeight)> {
+    let cache_key = (account_id.clone(), public_key.clone());
     let nonces = client.access_key_nonces.read().await;
-    if let Some(nonce) = nonces.get(cache_key) {
+    if let Some(nonce) = nonces.get(&cache_key) {
         cached_nonce(nonce, client).await
     } else {
         drop(nonces);
         let mut nonces = client.access_key_nonces.write().await;
-        match nonces.entry(cache_key.clone()) {
+        match nonces.entry(cache_key) {
             // case where multiple writers end up at the same lock acquisition point and tries
             // to overwrite the cached value that a previous writer already wrote.
             Entry::Occupied(entry) => cached_nonce(entry.get(), client).await,
@@ -255,9 +274,10 @@ async fn fetch_tx_nonce(client: &Client, cache_key: &CacheKey) -> Result<(Crypto
             // Write the cached value. This value will get invalidated when an InvalidNonce error is returned.
             Entry::Vacant(entry) => {
                 let (account_id, public_key) = entry.key();
-                let (access_key, block_hash, _) = client.access_key(account_id, public_key).await?;
+                let (access_key, block_hash, block_height) =
+                    client.access_key(account_id, public_key).await?;
                 entry.insert(AtomicU64::new(access_key.nonce + 1));
-                Ok((block_hash, access_key.nonce + 1))
+                Ok((access_key.nonce + 1, block_hash, block_height))
             }
         }
     }
