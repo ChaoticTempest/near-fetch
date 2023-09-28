@@ -1,6 +1,6 @@
 [package]
 name = "near-fetch"
-version = "0.0.10"
+version = "0.0.11"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -21,4 +21,12 @@ near-account-id = "0.17"
 near-crypto = "0.17"
 near-primitives = "0.17"
 near-jsonrpc-primitives = "0.17"
-near-jsonrpc-client = { version = "0.6", features = ["sandbox"] }
+near-jsonrpc-client = { version = "0.6", default-features = false }
+
+[features]
+default = ["rustls-tls", "sandbox"]
+adversarial = ["near-jsonrpc-client/adversarial"]
+any = ["near-jsonrpc-client/any"]
+sandbox = ["near-jsonrpc-client/sandbox"]
+native-tls = ["near-jsonrpc-client/native-tls"]
+rustls-tls = ["near-jsonrpc-client/rustls-tls"]

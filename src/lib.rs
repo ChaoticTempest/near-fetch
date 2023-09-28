@@ -20,7 +20,7 @@ use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::errors::{ActionError, ActionErrorKind, InvalidTxError, TxExecutionError};
 use near_primitives::hash::CryptoHash;
-use near_primitives::transaction::{Action, SignedTransaction};
+use near_primitives::transaction::{Action, Transaction};
 use near_primitives::types::{BlockHeight, BlockReference, Finality, Nonce};
 use near_primitives::views::{
     AccessKeyView, BlockView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus,
@@ -51,7 +51,6 @@ impl Clone for Client {
         Self {
             rpc_client: self.rpc_client.clone(),
             access_key_nonces: self.access_key_nonces.clone(),
-            // access_key_nonces: Default::default(),
         }
     }
 }
@@ -91,14 +90,15 @@ impl Client {
             let result = self
                 .rpc_client
                 .call(&RpcBroadcastTxCommitRequest {
-                    signed_transaction: SignedTransaction::from_actions(
+                    signed_transaction: Transaction {
                         nonce,
-                        signer.account_id().clone(),
-                        receiver_id.clone(),
-                        signer as &dyn Signer,
-                        actions.clone(),
                         block_hash,
-                    ),
+                        signer_id: signer.account_id().clone(),
+                        public_key: signer.public_key(),
+                        receiver_id: receiver_id.clone(),
+                        actions: actions.clone(),
+                    }
+                    .sign(signer),
                 })
                 .await;
 
