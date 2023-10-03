@@ -83,9 +83,11 @@ impl Client {
         receiver_id: &AccountId,
         actions: Vec<Action>,
     ) -> Result<FinalExecutionOutcomeView> {
-        let cache_key = (signer.account_id().clone(), signer.public_key());
-
         retry(|| async {
+            // Note, the cache key's public-key part can be different per retry loop. For instance,
+            // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
+            let cache_key = (signer.account_id().clone(), signer.public_key());
+
             let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
             let result = self
                 .rpc_client
