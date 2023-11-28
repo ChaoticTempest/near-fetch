@@ -62,6 +62,16 @@ impl Client {
         }
     }
 
+    /// Internal reference to the [`JsonRpcClient`] that is utilized for all RPC calls.
+    pub fn inner(&self) -> &JsonRpcClient {
+        &self.rpc_client
+    }
+
+    /// Internal mutable reference to the [`JsonRpcClient`] that is utilized for all RPC calls.
+    pub fn inner_mut(&mut self) -> &mut JsonRpcClient {
+        &mut self.rpc_client
+    }
+
     /// The RPC address the client is connected to.
     pub fn rpc_addr(&self) -> String {
         self.rpc_client.server_addr().into()
@@ -213,6 +223,12 @@ impl Client {
     pub async fn invalidate_cache(&self, cache_key: &CacheKey) {
         let mut nonces = self.access_key_nonces.write().await;
         nonces.remove(cache_key);
+    }
+}
+
+impl Into<JsonRpcClient> for Client {
+    fn into(self) -> JsonRpcClient {
+        self.rpc_client
     }
 }
 
