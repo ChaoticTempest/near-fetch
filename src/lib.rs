@@ -39,20 +39,11 @@ pub use crate::error::Error;
 pub type CacheKey = (AccountId, PublicKey);
 
 /// Client that implements exponential retrying and caching of access key nonces.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Client {
     rpc_client: JsonRpcClient,
     /// AccessKey nonces to reference when sending transactions.
     access_key_nonces: Arc<RwLock<HashMap<CacheKey, AtomicU64>>>,
-}
-
-impl Clone for Client {
-    fn clone(&self) -> Self {
-        Self {
-            rpc_client: self.rpc_client.clone(),
-            access_key_nonces: self.access_key_nonces.clone(),
-        }
-    }
 }
 
 impl Client {

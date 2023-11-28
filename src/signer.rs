@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 
 /// A key rotating in memory signer, that will rotate the key used for signing on
 /// each call to [`Signer::sign`].
+#[derive(Clone)]
 pub struct KeyRotatingSigner {
     signers: Arc<Vec<InMemorySigner>>,
     counter: Arc<AtomicUsize>,
@@ -53,15 +54,6 @@ impl KeyRotatingSigner {
 
     pub fn public_key(&self) -> &PublicKey {
         &self.current_signer().public_key
-    }
-}
-
-impl Clone for KeyRotatingSigner {
-    fn clone(&self) -> Self {
-        Self {
-            signers: self.signers.clone(),
-            counter: self.counter.clone(),
-        }
     }
 }
 
