@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use tokio::sync::RwLock;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
@@ -12,22 +10,23 @@ use tokio_retry::Retry;
 use near_account_id::AccountId;
 use near_crypto::{PublicKey, Signer};
 use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
-use near_jsonrpc_client::methods::block::RpcBlockRequest;
 use near_jsonrpc_client::methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest;
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
-use near_jsonrpc_client::JsonRpcClient;
+use near_jsonrpc_client::{methods, JsonRpcClient, MethodCallResult};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::errors::{ActionError, ActionErrorKind, InvalidTxError, TxExecutionError};
 use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::{Action, Transaction};
-use near_primitives::types::{BlockHeight, BlockReference, Finality, Nonce};
+use near_primitives::types::{BlockHeight, Finality, Nonce};
 use near_primitives::views::{
-    AccessKeyView, BlockView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus,
+    AccessKeyView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus,
     QueryRequest,
 };
 
 pub mod error;
+pub mod ops;
+pub mod query;
 pub mod signer;
 
 use crate::error::Result;
@@ -111,35 +110,13 @@ impl Client {
         .await
     }
 
-    /// View into a function.
-    pub async fn view<T: Serialize, R: DeserializeOwned>(
-        &self,
-        receiver_id: &AccountId,
-        function_name: &str,
-        args: T,
-    ) -> Result<R> {
-        let args = match serde_json::to_vec(&args) {
-            Ok(args) => args,
-            Err(e) => return Err(Error::SerializeError(e)),
-        };
-
-        let resp = self
-            .rpc_client
-            .call(RpcQueryRequest {
-                block_reference: Finality::Final.into(),
-                request: QueryRequest::CallFunction {
-                    account_id: receiver_id.clone(),
-                    method_name: function_name.into(),
-                    args: args.into(),
-                },
-            })
-            .await?;
-
-        let QueryResponseKind::CallResult(resp) = resp.kind else {
-            return Err(Error::RpcReturnedInvalidData("while querying view"));
-        };
-
-        Ok(serde_json::from_slice(&resp.result)?)
+    pub async fn send<M>(&self, method: M) -> MethodCallResult<M::Response, M::Error>
+    where
+        M: methods::RpcMethod + Send + Sync,
+        M::Response: Send,
+        M::Error: Send,
+    {
+        retry(|| async { self.rpc_client.call(&method).await }).await
     }
 
     /// Fetches the nonce associated to the account id and public key, which essentially is the
@@ -175,16 +152,10 @@ impl Client {
             QueryResponseKind::AccessKey(access_key) => {
                 Ok((access_key, resp.block_hash, resp.block_height))
             }
-            _ => Err(Error::RpcReturnedInvalidData("while querying access key")),
+            _ => Err(Error::RpcReturnedInvalidData(
+                "while querying access key".into(),
+            )),
         }
-    }
-
-    /// Fetches the block for this block reference.
-    pub async fn view_block(&self, block_reference: BlockReference) -> Result<BlockView> {
-        self.rpc_client
-            .call(&RpcBlockRequest { block_reference })
-            .await
-            .map_err(Into::into)
     }
 
     pub async fn check_and_invalidate_cache(
@@ -226,9 +197,9 @@ impl Client {
     }
 }
 
-impl Into<JsonRpcClient> for Client {
-    fn into(self) -> JsonRpcClient {
-        self.rpc_client
+impl From<Client> for JsonRpcClient {
+    fn from(client: Client) -> Self {
+        client.rpc_client
     }
 }
 
@@ -256,7 +227,7 @@ async fn cached_nonce(
     let nonce = nonce.fetch_add(1, Ordering::SeqCst);
 
     // Fetch latest block_hash since the previous one is now invalid for new transactions:
-    let block = client.view_block(Finality::Final.into()).await?;
+    let block = client.view_block().await?;
     Ok((nonce + 1, block.header.hash, block.header.height))
 }
 
