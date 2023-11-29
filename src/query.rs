@@ -24,7 +24,8 @@ use crate::ops::Function;
 use crate::{Client, Error, Result};
 
 /// Intenral type used to represent a boxed future.
-type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+pub(crate) type BoxFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// `Query` object allows creating queries into the network of our choice. This object is
 /// usually given from making calls from other functions such as [`view_state`].

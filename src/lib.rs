@@ -110,7 +110,8 @@ impl Client {
         .await
     }
 
-    pub async fn send<M>(&self, method: M) -> MethodCallResult<M::Response, M::Error>
+    /// Send a JsonRpc method to the network.
+    pub(crate) async fn send<M>(&self, method: M) -> MethodCallResult<M::Response, M::Error>
     where
         M: methods::RpcMethod + Send + Sync,
         M::Response: Send,
