@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use tokio::sync::RwLock;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
@@ -12,22 +10,23 @@ use tokio_retry::Retry;
 use near_account_id::AccountId;
 use near_crypto::{PublicKey, Signer};
 use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
-use near_jsonrpc_client::methods::block::RpcBlockRequest;
 use near_jsonrpc_client::methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest;
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
-use near_jsonrpc_client::JsonRpcClient;
+use near_jsonrpc_client::{methods, JsonRpcClient, MethodCallResult};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::errors::{ActionError, ActionErrorKind, InvalidTxError, TxExecutionError};
 use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::{Action, Transaction};
-use near_primitives::types::{BlockHeight, BlockReference, Finality, Nonce};
+use near_primitives::types::{BlockHeight, Finality, Nonce};
 use near_primitives::views::{
-    AccessKeyView, BlockView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus,
+    AccessKeyView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus,
     QueryRequest,
 };
 
 pub mod error;
+pub mod ops;
+pub mod query;
 pub mod signer;
 
 use crate::error::Result;
@@ -39,20 +38,11 @@ pub use crate::error::Error;
 pub type CacheKey = (AccountId, PublicKey);
 
 /// Client that implements exponential retrying and caching of access key nonces.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Client {
     rpc_client: JsonRpcClient,
     /// AccessKey nonces to reference when sending transactions.
     access_key_nonces: Arc<RwLock<HashMap<CacheKey, AtomicU64>>>,
-}
-
-impl Clone for Client {
-    fn clone(&self) -> Self {
-        Self {
-            rpc_client: self.rpc_client.clone(),
-            access_key_nonces: self.access_key_nonces.clone(),
-        }
-    }
 }
 
 impl Client {
@@ -69,6 +59,16 @@ impl Client {
             rpc_client: client,
             access_key_nonces: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Internal reference to the [`JsonRpcClient`] that is utilized for all RPC calls.
+    pub fn inner(&self) -> &JsonRpcClient {
+        &self.rpc_client
+    }
+
+    /// Internal mutable reference to the [`JsonRpcClient`] that is utilized for all RPC calls.
+    pub fn inner_mut(&mut self) -> &mut JsonRpcClient {
+        &mut self.rpc_client
     }
 
     /// The RPC address the client is connected to.
@@ -110,35 +110,54 @@ impl Client {
         .await
     }
 
-    /// View into a function.
-    pub async fn view<T: Serialize, R: DeserializeOwned>(
+    /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network. This is an async
+    /// operation, where a hash is returned to reference the transaction in the future and check
+    /// its status.
+    pub async fn send_tx_async<T: Signer + ExposeAccountId>(
         &self,
+        signer: &T,
         receiver_id: &AccountId,
-        function_name: &str,
-        args: T,
-    ) -> Result<R> {
-        let args = match serde_json::to_vec(&args) {
-            Ok(args) => args,
-            Err(e) => return Err(Error::SerializeError(e)),
-        };
+        actions: Vec<Action>,
+    ) -> Result<CryptoHash> {
+        retry(|| async {
+            // Note, the cache key's public-key part can be different per retry loop. For instance,
+            // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
+            let cache_key = (signer.account_id().clone(), signer.public_key());
 
-        let resp = self
-            .rpc_client
-            .call(RpcQueryRequest {
-                block_reference: Finality::Final.into(),
-                request: QueryRequest::CallFunction {
-                    account_id: receiver_id.clone(),
-                    method_name: function_name.into(),
-                    args: args.into(),
-                },
-            })
-            .await?;
+            let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
+            let result = self
+                .rpc_client
+                .call(&methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest {
+                    signed_transaction: Transaction {
+                        nonce,
+                        block_hash,
+                        signer_id: signer.account_id().clone(),
+                        public_key: signer.public_key(),
+                        receiver_id: receiver_id.clone(),
+                        actions: actions.clone(),
+                    }
+                    .sign(signer),
+                })
+                .await;
 
-        let QueryResponseKind::CallResult(resp) = resp.kind else {
-            return Err(Error::RpcReturnedInvalidData("while querying view"));
-        };
+            if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(_err))) = &result
+            {
+                // RpcBroadcastTxAsyncError should not be returned. If it does, invalidate the cache just in case.
+                self.invalidate_cache(&cache_key).await;
+            }
+            result.map_err(Into::into)
+        })
+        .await
+    }
 
-        Ok(serde_json::from_slice(&resp.result)?)
+    /// Send a JsonRpc method to the network.
+    pub(crate) async fn send<M>(&self, method: M) -> MethodCallResult<M::Response, M::Error>
+    where
+        M: methods::RpcMethod + Send + Sync,
+        M::Response: Send,
+        M::Error: Send,
+    {
+        retry(|| async { self.rpc_client.call(&method).await }).await
     }
 
     /// Fetches the nonce associated to the account id and public key, which essentially is the
@@ -174,16 +193,10 @@ impl Client {
             QueryResponseKind::AccessKey(access_key) => {
                 Ok((access_key, resp.block_hash, resp.block_height))
             }
-            _ => Err(Error::RpcReturnedInvalidData("while querying access key")),
+            _ => Err(Error::RpcReturnedInvalidData(
+                "while querying access key".into(),
+            )),
         }
-    }
-
-    /// Fetches the block for this block reference.
-    pub async fn view_block(&self, block_reference: BlockReference) -> Result<BlockView> {
-        self.rpc_client
-            .call(&RpcBlockRequest { block_reference })
-            .await
-            .map_err(Into::into)
     }
 
     pub async fn check_and_invalidate_cache(
@@ -225,6 +238,12 @@ impl Client {
     }
 }
 
+impl From<Client> for JsonRpcClient {
+    fn from(client: Client) -> Self {
+        client.rpc_client
+    }
+}
+
 async fn fetch_tx_errs(result: &FinalExecutionOutcomeView) -> Vec<&TxExecutionError> {
     let mut failures = Vec::new();
 
@@ -249,7 +268,7 @@ async fn cached_nonce(
     let nonce = nonce.fetch_add(1, Ordering::SeqCst);
 
     // Fetch latest block_hash since the previous one is now invalid for new transactions:
-    let block = client.view_block(Finality::Final.into()).await?;
+    let block = client.view_block().await?;
     Ok((nonce + 1, block.header.hash, block.header.height))
 }
 
