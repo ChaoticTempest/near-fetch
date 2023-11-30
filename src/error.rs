@@ -1,4 +1,5 @@
 use near_jsonrpc_client::errors::JsonRpcError;
+use near_jsonrpc_client::methods::broadcast_tx_async::RpcBroadcastTxAsyncError;
 use near_jsonrpc_primitives::types::blocks::RpcBlockError;
 use near_jsonrpc_primitives::types::chunks::RpcChunkError;
 use near_jsonrpc_primitives::types::query::RpcQueryError;
@@ -17,6 +18,8 @@ pub enum Error {
     RpcChunkError(#[from] JsonRpcError<RpcChunkError>),
     #[error(transparent)]
     RpcTransactionError(#[from] JsonRpcError<RpcTransactionError>),
+    #[error(transparent)]
+    RpcTransactionAsyncError(#[from] JsonRpcError<RpcBroadcastTxAsyncError>),
     #[error("invalid data returned: {0}")]
     RpcReturnedInvalidData(String),
     /// Catch all RPC error. This is usually resultant from query calls.

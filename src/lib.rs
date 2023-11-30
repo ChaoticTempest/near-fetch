@@ -110,6 +110,46 @@ impl Client {
         .await
     }
 
+    /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network. This is an async
+    /// operation, where a hash is returned to reference the transaction in the future and check
+    /// its status.
+    pub async fn send_tx_async<T: Signer + ExposeAccountId>(
+        &self,
+        signer: &T,
+        receiver_id: &AccountId,
+        actions: Vec<Action>,
+    ) -> Result<CryptoHash> {
+        retry(|| async {
+            // Note, the cache key's public-key part can be different per retry loop. For instance,
+            // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
+            let cache_key = (signer.account_id().clone(), signer.public_key());
+
+            let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
+            let result = self
+                .rpc_client
+                .call(&methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest {
+                    signed_transaction: Transaction {
+                        nonce,
+                        block_hash,
+                        signer_id: signer.account_id().clone(),
+                        public_key: signer.public_key(),
+                        receiver_id: receiver_id.clone(),
+                        actions: actions.clone(),
+                    }
+                    .sign(signer),
+                })
+                .await;
+
+            if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(_err))) = &result
+            {
+                // RpcBroadcastTxAsyncError should not be returned. If it does, invalidate the cache just in case.
+                self.invalidate_cache(&cache_key).await;
+            }
+            result.map_err(Into::into)
+        })
+        .await
+    }
+
     /// Send a JsonRpc method to the network.
     pub(crate) async fn send<M>(&self, method: M) -> MethodCallResult<M::Response, M::Error>
     where
