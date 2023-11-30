@@ -96,14 +96,14 @@ impl Function {
     }
 }
 
-pub struct CallableFunction<'a, S> {
+pub struct FunctionCallTransaction<'a, S> {
     pub(crate) client: &'a Client,
     pub(crate) signer: S,
     pub(crate) contract_id: AccountId,
     pub(crate) function: Function,
 }
 
-impl<S> CallableFunction<'_, S> {
+impl<S> FunctionCallTransaction<'_, S> {
     /// Provide the arguments for the call. These args are serialized bytes from either
     /// a JSON or Borsh serializable set of arguments. To use the more specific versions
     /// with better quality of life, use `args_json` or `args_borsh`.
@@ -146,25 +146,8 @@ impl<S> CallableFunction<'_, S> {
     }
 }
 
-impl Client {
-    /// Start calling into a contract on a specific function.
-    pub fn call<S: Signer + ExposeAccountId>(
-        &self,
-        signer: S,
-        contract_id: &AccountId,
-        function: &str,
-    ) -> CallableFunction<'_, S> {
-        CallableFunction {
-            client: self,
-            signer,
-            contract_id: contract_id.clone(),
-            function: Function::new(function),
-        }
-    }
-}
-
 impl<'a, S: Signer + ExposeAccountId + 'static> std::future::IntoFuture
-    for CallableFunction<'a, S>
+    for FunctionCallTransaction<'a, S>
 {
     type Output = Result<FinalExecutionOutcomeView>;
     type IntoFuture = BoxFuture<'a, Self::Output>;
@@ -179,5 +162,22 @@ impl<'a, S: Signer + ExposeAccountId + 'static> std::future::IntoFuture
                 )
                 .await
         })
+    }
+}
+
+impl Client {
+    /// Start calling into a contract on a specific function.
+    pub fn call<S: Signer + ExposeAccountId>(
+        &self,
+        signer: S,
+        contract_id: &AccountId,
+        function: &str,
+    ) -> FunctionCallTransaction<'_, S> {
+        FunctionCallTransaction {
+            client: self,
+            signer,
+            contract_id: contract_id.clone(),
+            function: Function::new(function),
+        }
     }
 }
