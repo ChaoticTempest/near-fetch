@@ -93,7 +93,7 @@ where
             let block_reference = self.block_ref.unwrap_or_else(BlockReference::latest);
             let resp = self
                 .client
-                .send(self.method.into_request(block_reference)?)
+                .send_query(&self.method.into_request(block_reference)?)
                 .await
                 .map_err(|err| Error::Rpc(err.into()))?;
 
@@ -444,7 +444,7 @@ impl<'a> std::future::IntoFuture for QueryChunk<'a> {
 
             let chunk_view = self
                 .client
-                .send(methods::chunk::RpcChunkRequest { chunk_reference })
+                .send_query(&methods::chunk::RpcChunkRequest { chunk_reference })
                 .await?;
 
             Ok(chunk_view)
