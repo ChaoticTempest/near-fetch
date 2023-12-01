@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use ops::RetryableTransaction;
 use signer::SignerExt;
 use tokio::sync::RwLock;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
@@ -77,38 +78,51 @@ impl Client {
         self.rpc_client.server_addr().into()
     }
 
-    /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network.
-    pub async fn send_tx(
+    /// Send the transaction only once. No retrying involved.
+    pub(crate) async fn send_tx_once(
         &self,
         signer: &dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
     ) -> Result<FinalExecutionOutcomeView> {
-        retry(|| async {
-            // Note, the cache key's public-key part can be different per retry loop. For instance,
-            // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
-            let cache_key = (signer.account_id().clone(), signer.public_key());
+        let cache_key = (signer.account_id().clone(), signer.public_key());
 
-            let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
-            let result = self
-                .rpc_client
-                .call(&RpcBroadcastTxCommitRequest {
-                    signed_transaction: Transaction {
-                        nonce,
-                        block_hash,
-                        signer_id: signer.account_id().clone(),
-                        public_key: signer.public_key(),
-                        receiver_id: receiver_id.clone(),
-                        actions: actions.clone(),
-                    }
-                    .sign(signer.as_signer()),
-                })
-                .await;
+        let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
+        let result = self
+            .rpc_client
+            .call(&RpcBroadcastTxCommitRequest {
+                signed_transaction: Transaction {
+                    nonce,
+                    block_hash,
+                    signer_id: signer.account_id().clone(),
+                    public_key: signer.public_key(),
+                    receiver_id: receiver_id.clone(),
+                    actions: actions.clone(),
+                }
+                .sign(signer.as_signer()),
+            })
+            .await;
 
-            self.check_and_invalidate_cache(&cache_key, &result).await;
-            result.map_err(Into::into)
-        })
-        .await
+        self.check_and_invalidate_cache(&cache_key, &result).await;
+        result.map_err(Into::into)
+    }
+
+    /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network.
+    /// This gives us a transaction is that retryable. To retry, simply add in a `.retry_*`
+    /// method call to the end of the chain before an `.await` gets invoked.
+    pub fn send_tx<'a>(
+        &self,
+        signer: &'a dyn SignerExt,
+        receiver_id: &AccountId,
+        actions: Vec<Action>,
+    ) -> RetryableTransaction<'a> {
+        RetryableTransaction {
+            client: self.clone(),
+            signer,
+            actions: Ok(actions),
+            receiver_id: receiver_id.clone(),
+            strategy: None,
+        }
     }
 
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network. This is an async
@@ -120,35 +134,31 @@ impl Client {
         receiver_id: &AccountId,
         actions: Vec<Action>,
     ) -> Result<CryptoHash> {
-        retry(|| async {
-            // Note, the cache key's public-key part can be different per retry loop. For instance,
-            // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
-            let cache_key = (signer.account_id().clone(), signer.public_key());
+        // Note, the cache key's public-key part can be different per retry loop. For instance,
+        // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
+        let cache_key = (signer.account_id().clone(), signer.public_key());
 
-            let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
-            let result = self
-                .rpc_client
-                .call(&methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest {
-                    signed_transaction: Transaction {
-                        nonce,
-                        block_hash,
-                        signer_id: signer.account_id().clone(),
-                        public_key: signer.public_key(),
-                        receiver_id: receiver_id.clone(),
-                        actions: actions.clone(),
-                    }
-                    .sign(signer.as_signer()),
-                })
-                .await;
+        let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
+        let result = self
+            .rpc_client
+            .call(&methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest {
+                signed_transaction: Transaction {
+                    nonce,
+                    block_hash,
+                    signer_id: signer.account_id().clone(),
+                    public_key: signer.public_key(),
+                    receiver_id: receiver_id.clone(),
+                    actions: actions.clone(),
+                }
+                .sign(signer.as_signer()),
+            })
+            .await;
 
-            if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(_err))) = &result
-            {
-                // RpcBroadcastTxAsyncError should not be returned. If it does, invalidate the cache just in case.
-                self.invalidate_cache(&cache_key).await;
-            }
-            result.map_err(Into::into)
-        })
-        .await
+        if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(_err))) = &result {
+            // RpcBroadcastTxAsyncError should not be returned. If it does, invalidate the cache just in case.
+            self.invalidate_cache(&cache_key).await;
+        }
+        result.map_err(Into::into)
     }
 
     /// Send a JsonRpc method to the network.
