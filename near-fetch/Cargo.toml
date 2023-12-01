@@ -3,7 +3,7 @@ name = "near-fetch"
 version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-readme = "README.md"
+readme = "../README.md"
 repository = "https://github.com/ChaoticTempest/fetch"
 description = """
 High level client library for transacting to the NEAR network.
