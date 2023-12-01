@@ -1,10 +1,14 @@
 //! All operation types that are generated/used when commiting transactions to the network.
 
+use std::fmt;
+use std::task::Poll;
 use std::time::Duration;
 
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use near_gas::NearGas;
+use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
+use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::account::AccessKey;
 use near_primitives::borsh;
 use near_primitives::hash::CryptoHash;
@@ -116,15 +120,15 @@ impl Function {
     }
 }
 
-pub struct FunctionCallTransaction<'a, 'b> {
-    pub(crate) client: &'a Client,
-    pub(crate) signer: &'b dyn SignerExt,
+pub struct FunctionCallTransaction<'a> {
+    pub(crate) client: Client,
+    pub(crate) signer: &'a dyn SignerExt,
     pub(crate) receiver_id: AccountId,
     pub(crate) function: Function,
     pub(crate) retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
 }
 
-impl FunctionCallTransaction<'_, '_> {
+impl FunctionCallTransaction<'_> {
     /// Provide the arguments for the call. These args are serialized bytes from either
     /// a JSON or Borsh serializable set of arguments. To use the more specific versions
     /// with better quality of life, use `args_json` or `args_borsh`.
@@ -167,7 +171,7 @@ impl FunctionCallTransaction<'_, '_> {
     }
 }
 
-impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
+impl<'a> FunctionCallTransaction<'a> {
     /// Process the transaction, and return the result of the execution.
     pub async fn transact(self) -> Result<ExecutionFinalResult> {
         RetryableTransaction {
@@ -189,20 +193,27 @@ impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
     /// for which we can call into [`status`] and/or `.await` to retrieve info about whether
     /// the transaction has been completed or not. Note that `.await` will wait till completion
     /// of the transaction.
-    pub async fn transact_async(self) -> Result<CryptoHash> {
-        self.client
+    pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
+        let hash = self
+            .client
             .send_tx_async(
                 self.signer,
                 &self.receiver_id,
                 vec![self.function.into_action()?.into()],
             )
-            .await
+            .await?;
+
+        Ok(AsyncTransactionStatus::new(
+            self.client,
+            self.receiver_id,
+            hash,
+        ))
     }
 
     /// Retry this transactions if it fails. This will retry the transaction with exponential
-    /// backoff.
+    /// backoff. This cannot be used in combination with
     pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
-        self.retry_with(
+        self.retry(
             ExponentialBackoff::from_millis(base_millis)
                 .map(jitter)
                 .take(max_retries),
@@ -211,7 +222,7 @@ impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
 
     /// Retry this transactions if it fails. This will retry the transaction with the provided
     /// retry strategy.
-    pub fn retry_with(
+    pub fn retry(
         mut self,
         strategy: impl Iterator<Item = Duration> + Send + Sync + 'static,
     ) -> Self {
@@ -225,23 +236,19 @@ impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
 /// [NEAR transactions](https://docs.near.org/docs/concepts/transaction).
 ///
 /// All actions are performed on the account specified by `receiver_id`.
-pub struct Transaction<'a, 'b> {
-    client: &'a Client,
-    signer: &'b dyn SignerExt,
+pub struct Transaction<'a> {
+    client: Client,
+    signer: &'a dyn SignerExt,
     receiver_id: AccountId,
     // Result used to defer errors in argument parsing to later when calling into transact
     actions: Result<Vec<Action>>,
     retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
 }
 
-impl<'a, 'b> Transaction<'a, 'b> {
-    pub(crate) fn new(
-        client: &'a Client,
-        signer: &'b dyn SignerExt,
-        receiver_id: AccountId,
-    ) -> Self {
+impl<'a> Transaction<'a> {
+    pub(crate) fn new(client: &Client, signer: &'a dyn SignerExt, receiver_id: AccountId) -> Self {
         Self {
-            client,
+            client: client.clone(),
             signer,
             receiver_id,
             actions: Ok(Vec::new()),
@@ -263,14 +270,21 @@ impl<'a, 'b> Transaction<'a, 'b> {
 
     /// Send the transaction to the network to be processed. This will be done asynchronously
     /// without waiting for the transaction to complete.
-    pub async fn transact_async(self) -> Result<CryptoHash> {
-        self.client
+    pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
+        let hash = self
+            .client
             .send_tx_async(self.signer, &self.receiver_id, self.actions?)
-            .await
+            .await?;
+
+        Ok(AsyncTransactionStatus::new(
+            self.client,
+            self.receiver_id,
+            hash,
+        ))
     }
 }
 
-impl Transaction<'_, '_> {
+impl Transaction<'_> {
     /// Adds a key to the `receiver_id`'s account, where the public key can be used
     /// later to delete the same key.
     pub fn add_key(mut self, pk: PublicKey, ak: AccessKey) -> Self {
@@ -451,14 +465,14 @@ impl<'a> std::future::IntoFuture for RetryableTransaction<'a> {
 impl Client {
     /// Start calling into a contract on a specific function. Returns a [`FunctionCallTransaction`]
     /// object where we can use to add more parameters such as the arguments, deposit, and gas.
-    pub fn call<'b>(
+    pub fn call<'a>(
         &self,
-        signer: &'b dyn SignerExt,
+        signer: &'a dyn SignerExt,
         contract_id: &AccountId,
         function: &str,
-    ) -> FunctionCallTransaction<'_, 'b> {
+    ) -> FunctionCallTransaction<'a> {
         FunctionCallTransaction {
-            client: self,
+            client: self.clone(),
             signer,
             receiver_id: contract_id.clone(),
             function: Function::new(function),
@@ -469,12 +483,105 @@ impl Client {
     /// Start a batch transaction. Returns a [`Transaction`] object that we can
     /// use to add Actions to the batched transaction. Call `transact` to send
     /// the batched transaction to the network.
-    pub fn batch<'b>(
+    pub fn batch<'a>(
         &self,
-        signer: &'b dyn SignerExt,
+        signer: &'a dyn SignerExt,
         contract_id: &AccountId,
         function: &str,
-    ) -> Transaction<'_, 'b> {
+    ) -> Transaction<'a> {
         Transaction::new(self, signer, contract_id.clone()).call(Function::new(function))
+    }
+}
+
+/// `TransactionStatus` object relating to an [`asynchronous transaction`] on the network.
+/// Used to query into the status of the Transaction for whether it has completed or not.
+///
+/// [`asynchronous transaction`]: https://docs.near.org/api/rpc/transactions#send-transaction-async
+#[derive(Clone)]
+#[must_use]
+pub struct AsyncTransactionStatus {
+    client: Client,
+    sender_id: AccountId,
+    hash: CryptoHash,
+}
+
+impl AsyncTransactionStatus {
+    pub(crate) fn new(client: Client, sender_id: AccountId, hash: CryptoHash) -> Self {
+        Self {
+            client,
+            sender_id,
+            hash,
+        }
+    }
+
+    /// Query the status of the transaction. This will return a [`TransactionStatus`]
+    /// object that we can use to query into the status of the transaction.
+    pub async fn status(&self) -> Result<Poll<ExecutionFinalResult>> {
+        let result = self
+            .client
+            .tx_async_status(&self.sender_id, self.hash)
+            .await
+            .map(ExecutionFinalResult::from_view);
+
+        match result {
+            Ok(result) => Ok(Poll::Ready(result)),
+            Err(err) => match err {
+                Error::RpcTransactionError(JsonRpcError::ServerError(
+                    JsonRpcServerError::HandlerError(RpcTransactionError::UnknownTransaction {
+                        ..
+                    }),
+                )) => Ok(Poll::Pending),
+                Error::RpcTransactionError(JsonRpcError::ServerError(
+                    JsonRpcServerError::HandlerError(RpcTransactionError::TimeoutError),
+                )) => Ok(Poll::Pending),
+                other => Err(other),
+            },
+        }
+    }
+
+    /// Wait until the completion of the transaction by polling [`AsyncTransactionStatus::status`].
+    pub(crate) async fn wait_default(self) -> Result<ExecutionFinalResult> {
+        self.wait(Duration::from_millis(300)).await
+    }
+
+    /// Wait until the transaction completes with a given time interval. This will poll the
+    /// [`AsyncTransactionStatus::status`] every interval until the transaction completes.
+    pub async fn wait(self, interval: Duration) -> Result<ExecutionFinalResult> {
+        loop {
+            match self.status().await? {
+                Poll::Ready(val) => break Ok(val),
+                Poll::Pending => (),
+            }
+
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    /// Get the [`AccountId`] of the account that initiated this transaction.
+    pub fn sender_id(&self) -> &AccountId {
+        &self.sender_id
+    }
+
+    /// Reference [`CryptoHash`] to the submitted transaction, pending completion.
+    pub fn hash(&self) -> &CryptoHash {
+        &self.hash
+    }
+}
+
+impl fmt::Debug for AsyncTransactionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransactionStatus")
+            .field("sender_id", &self.sender_id)
+            .field("hash", &self.hash)
+            .finish()
+    }
+}
+
+impl std::future::IntoFuture for AsyncTransactionStatus {
+    type Output = Result<ExecutionFinalResult>;
+    type IntoFuture = BoxFuture<'static, Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async { self.wait_default().await })
     }
 }

@@ -3,11 +3,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use ops::RetryableTransaction;
-use signer::SignerExt;
 use tokio::sync::RwLock;
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
-use tokio_retry::Retry;
 
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
@@ -33,6 +29,8 @@ pub mod result;
 pub mod signer;
 
 use crate::error::Result;
+use crate::ops::RetryableTransaction;
+use crate::signer::SignerExt;
 
 pub use crate::error::Error;
 
@@ -162,13 +160,13 @@ impl Client {
     }
 
     /// Send a JsonRpc method to the network.
-    pub(crate) async fn send<M>(&self, method: M) -> MethodCallResult<M::Response, M::Error>
+    pub(crate) async fn send_query<M>(&self, method: &M) -> MethodCallResult<M::Response, M::Error>
     where
         M: methods::RpcMethod + Send + Sync,
         M::Response: Send,
         M::Error: Send,
     {
-        retry(|| async { self.rpc_client.call(&method).await }).await
+        self.rpc_client.call(method).await
     }
 
     /// Fetches the nonce associated to the account id and public key, which essentially is the
@@ -313,15 +311,4 @@ async fn fetch_nonce(
             }
         }
     }
-}
-
-async fn retry<R, E, T, F>(task: F) -> T::Output
-where
-    F: FnMut() -> T,
-    T: core::future::Future<Output = core::result::Result<R, E>>,
-{
-    // Exponential backoff starting w/ 5ms for maximum retry of 4 times with the following delays:
-    //   5, 25, 125, 625 ms
-    let retry_strategy = ExponentialBackoff::from_millis(5).map(jitter).take(4);
-    Retry::spawn(retry_strategy, task).await
 }
