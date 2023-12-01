@@ -211,7 +211,7 @@ impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
     }
 
     /// Retry this transactions if it fails. This will retry the transaction with exponential
-    /// backoff.
+    /// backoff. This cannot be used in combination with
     pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
         self.retry(
             ExponentialBackoff::from_millis(base_millis)
@@ -528,20 +528,29 @@ impl AsyncTransactionStatus {
                         ..
                     }),
                 )) => Ok(Poll::Pending),
+                Error::RpcTransactionError(JsonRpcError::ServerError(
+                    JsonRpcServerError::HandlerError(RpcTransactionError::TimeoutError),
+                )) => Ok(Poll::Pending),
                 other => Err(other),
             },
         }
     }
 
     /// Wait until the completion of the transaction by polling [`AsyncTransactionStatus::status`].
-    pub(crate) async fn wait(self) -> Result<ExecutionFinalResult> {
+    pub(crate) async fn wait_default(self) -> Result<ExecutionFinalResult> {
+        self.wait(Duration::from_millis(300)).await
+    }
+
+    /// Wait until the transaction completes with a given time interval. This will poll the
+    /// [`AsyncTransactionStatus::status`] every interval until the transaction completes.
+    pub async fn wait(self, interval: Duration) -> Result<ExecutionFinalResult> {
         loop {
             match self.status().await? {
                 Poll::Ready(val) => break Ok(val),
                 Poll::Pending => (),
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(interval).await;
         }
     }
 
@@ -570,6 +579,6 @@ impl std::future::IntoFuture for AsyncTransactionStatus {
     type IntoFuture = BoxFuture<'static, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async { self.wait().await })
+        Box::pin(async { self.wait_default().await })
     }
 }
