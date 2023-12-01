@@ -28,6 +28,7 @@ pub mod error;
 pub mod ops;
 pub mod query;
 pub mod signer;
+pub mod result;
 
 use crate::error::Result;
 use crate::signer::ExposeAccountId;

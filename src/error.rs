@@ -4,6 +4,7 @@ use near_jsonrpc_primitives::types::blocks::RpcBlockError;
 use near_jsonrpc_primitives::types::chunks::RpcChunkError;
 use near_jsonrpc_primitives::types::query::RpcQueryError;
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
+use near_primitives::errors::TxExecutionError;
 
 pub type Result<T, E = Error> = core::result::Result<T, E>;
 
@@ -25,9 +26,13 @@ pub enum Error {
     /// Catch all RPC error. This is usually resultant from query calls.
     #[error("rpc: {0}")]
     Rpc(Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    TxExecution(Box<TxExecutionError>),
 
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
+    #[error(transparent)]
+    Base64(#[from] base64::DecodeError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("invalid args were passed: {0}")]

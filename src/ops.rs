@@ -1,3 +1,5 @@
+//! All operation types that are generated/used when commiting transactions to the network.
+
 use near_account_id::AccountId;
 use near_crypto::{PublicKey, Signer};
 use near_gas::NearGas;
@@ -11,11 +13,20 @@ use near_primitives::transaction::{
 use near_primitives::views::FinalExecutionOutcomeView;
 use near_token::NearToken;
 
+use crate::result::ExecutionFinalResult;
 use crate::signer::ExposeAccountId;
 use crate::{Client, Error, Result};
 
+/// Maximum amount of gas that can be used in a single transaction.
 pub const MAX_GAS: NearGas = NearGas::from_tgas(300);
+
+/// Default amount of gas to be used when calling into a function on a contract.
+/// This is set to 10 TGas as a default for convenience.
 pub const DEFAULT_CALL_FN_GAS: NearGas = NearGas::from_tgas(10);
+
+/// Default amount of deposit to be used when calling into a function on a contract.
+/// This is set to 0 NEAR as a default for convenience. Note, that some contracts
+/// will require 1 yoctoNEAR to be deposited in order to perform a function.
 pub const DEFAULT_CALL_DEPOSIT: NearToken = NearToken::from_near(0);
 
 /// A set of arguments we can provide to a transaction, containing
@@ -155,7 +166,7 @@ where
     S: Signer + ExposeAccountId + 'static,
 {
     /// Process the transaction, and return the result of the execution.
-    pub async fn transact(self) -> Result<FinalExecutionOutcomeView> {
+    pub async fn transact(self) -> Result<ExecutionFinalResult> {
         self.client
             .send_tx(
                 &self.signer,
@@ -163,6 +174,7 @@ where
                 vec![self.function.into_action()?.into()],
             )
             .await
+            .map(ExecutionFinalResult::from_view)
     }
 
     /// Send the transaction to the network to be processed. This will be done asynchronously
