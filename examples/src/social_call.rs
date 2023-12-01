@@ -1,4 +1,5 @@
 use near_account_id::AccountId;
+use near_crypto::InMemorySigner;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -7,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     let my_id: &str = "chaotictempest.near";
     let sk = "Insert your secret key here. Please do not commit your secret key to git! This is just an example";
 
-    // let account = Account::from_secret_key(my_id.parse()?, SecretKey::from_str(sk)?, &worker);
+    let signer = InMemorySigner::from_secret_key(my_id.parse()?, sk.parse()?);
     let social: AccountId = "social.near".parse()?;
 
     // Get and show our current profile data:
@@ -19,12 +20,12 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     println!("{:#?}", res.json::<serde_json::Value>());
 
-    /// Set some test data into social.near. Default gas of 10Tgas is used.
+    // Set some test data into social.near. Default gas of 10Tgas is used.
     let result = client
-        .call(&social, "set")
+        .call(&signer, &social, "set")
         .args_json(serde_json::json!({
             "data": {
-                me: {
+                my_id: {
                     "test": {
                         "input": "Hello from near_fetch client",
                     }

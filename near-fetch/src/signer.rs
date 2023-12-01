@@ -87,3 +87,16 @@ impl ExposeAccountId for KeyRotatingSigner {
         self.current_signer().account_id()
     }
 }
+
+/// A trait for extending the [`Signer`] trait with additional functionality.
+pub trait SignerExt: Signer + ExposeAccountId {
+    fn as_signer(&self) -> &dyn Signer;
+}
+impl<T> SignerExt for T
+where
+    T: Signer + ExposeAccountId,
+{
+    fn as_signer(&self) -> &dyn Signer {
+        self
+    }
+}
