@@ -15,8 +15,8 @@ use near_primitives::borsh;
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::{BlockHeight, BlockId, BlockReference, Finality, ShardId, StoreKey};
 use near_primitives::views::{
-    AccessKeyList, AccessKeyView, AccountView, BlockView, CallResult, ChunkView, QueryRequest,
-    ViewStateResult,
+    AccessKeyList, AccessKeyView, AccountView, BlockView, CallResult, ChunkView,
+    FinalExecutionOutcomeView, QueryRequest, ViewStateResult,
 };
 use near_token::NearToken;
 
@@ -548,5 +548,22 @@ impl Client {
     /// Fetches the latest gas price on the network.
     pub fn gas_price(&self) -> Query<'_, GasPrice> {
         Query::new(self, GasPrice)
+    }
+
+    /// Fetches the status of a transaction given the transaction hash.
+    pub async fn tx_async_status(
+        &self,
+        sender_id: &AccountId,
+        tx_hash: CryptoHash,
+    ) -> Result<FinalExecutionOutcomeView> {
+        self.rpc_client
+            .call(methods::tx::RpcTransactionStatusRequest {
+                transaction_info: methods::tx::TransactionInfo::TransactionId {
+                    account_id: sender_id.clone(),
+                    hash: tx_hash,
+                },
+            })
+            .await
+            .map_err(Into::into)
     }
 }
