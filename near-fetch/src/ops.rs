@@ -397,12 +397,33 @@ impl Transaction<'_, '_> {
 }
 
 pub struct RetryableTransaction<'a> {
-    // pub(crate) signer: &'a dyn SignerExt,
     pub(crate) client: Client,
     pub(crate) signer: &'a dyn SignerExt,
     pub(crate) receiver_id: AccountId,
     pub(crate) actions: Result<Vec<Action>>,
     pub(crate) strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
+}
+
+impl RetryableTransaction<'_> {
+    /// Retry this transactions if it fails. This will retry the transaction with exponential
+    /// backoff.
+    pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
+        self.retry(
+            ExponentialBackoff::from_millis(base_millis)
+                .map(jitter)
+                .take(max_retries),
+        )
+    }
+
+    /// Retry this transactions if it fails. This will retry the transaction with the provided
+    /// retry strategy.
+    pub fn retry(
+        mut self,
+        strategy: impl Iterator<Item = Duration> + Send + Sync + 'static,
+    ) -> Self {
+        self.strategy = Some(Box::new(strategy));
+        self
+    }
 }
 
 impl<'a> std::future::IntoFuture for RetryableTransaction<'a> {

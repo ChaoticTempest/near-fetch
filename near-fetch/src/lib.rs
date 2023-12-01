@@ -78,6 +78,24 @@ impl Client {
         self.rpc_client.server_addr().into()
     }
 
+    /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network.
+    /// This gives us a transaction is that retryable. To retry, simply add in a `.retry_*`
+    /// method call to the end of the chain before an `.await` gets invoked.
+    pub fn send_tx<'a>(
+        &self,
+        signer: &'a dyn SignerExt,
+        receiver_id: &AccountId,
+        actions: Vec<Action>,
+    ) -> RetryableTransaction<'a> {
+        RetryableTransaction {
+            client: self.clone(),
+            signer,
+            actions: Ok(actions),
+            receiver_id: receiver_id.clone(),
+            strategy: None,
+        }
+    }
+
     /// Send the transaction only once. No retrying involved.
     pub(crate) async fn send_tx_once(
         &self,
@@ -105,24 +123,6 @@ impl Client {
 
         self.check_and_invalidate_cache(&cache_key, &result).await;
         result.map_err(Into::into)
-    }
-
-    /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network.
-    /// This gives us a transaction is that retryable. To retry, simply add in a `.retry_*`
-    /// method call to the end of the chain before an `.await` gets invoked.
-    pub fn send_tx<'a>(
-        &self,
-        signer: &'a dyn SignerExt,
-        receiver_id: &AccountId,
-        actions: Vec<Action>,
-    ) -> RetryableTransaction<'a> {
-        RetryableTransaction {
-            client: self.clone(),
-            signer,
-            actions: Ok(actions),
-            receiver_id: receiver_id.clone(),
-            strategy: None,
-        }
     }
 
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network. This is an async
