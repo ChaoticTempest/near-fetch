@@ -1,10 +1,14 @@
 //! All operation types that are generated/used when commiting transactions to the network.
 
+use std::fmt;
+use std::task::Poll;
 use std::time::Duration;
 
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use near_gas::NearGas;
+use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
+use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::account::AccessKey;
 use near_primitives::borsh;
 use near_primitives::hash::CryptoHash;
@@ -189,14 +193,21 @@ impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
     /// for which we can call into [`status`] and/or `.await` to retrieve info about whether
     /// the transaction has been completed or not. Note that `.await` will wait till completion
     /// of the transaction.
-    pub async fn transact_async(self) -> Result<CryptoHash> {
-        self.client
+    pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
+        let hash = self
+            .client
             .send_tx_async(
                 self.signer,
                 &self.receiver_id,
                 vec![self.function.into_action()?.into()],
             )
-            .await
+            .await?;
+
+        Ok(AsyncTransactionStatus::new(
+            self.client,
+            self.receiver_id,
+            hash,
+        ))
     }
 
     /// Retry this transactions if it fails. This will retry the transaction with exponential
@@ -476,5 +487,89 @@ impl Client {
         function: &str,
     ) -> Transaction<'_, 'b> {
         Transaction::new(self, signer, contract_id.clone()).call(Function::new(function))
+    }
+}
+
+/// `TransactionStatus` object relating to an [`asynchronous transaction`] on the network.
+/// Used to query into the status of the Transaction for whether it has completed or not.
+///
+/// [`asynchronous transaction`]: https://docs.near.org/api/rpc/transactions#send-transaction-async
+#[derive(Clone)]
+#[must_use]
+pub struct AsyncTransactionStatus {
+    client: Client,
+    sender_id: AccountId,
+    hash: CryptoHash,
+}
+
+impl AsyncTransactionStatus {
+    pub(crate) fn new(client: &Client, sender_id: AccountId, hash: CryptoHash) -> Self {
+        Self {
+            client: client.clone(),
+            sender_id,
+            hash,
+        }
+    }
+
+    /// Query the status of the transaction. This will return a [`TransactionStatus`]
+    /// object that we can use to query into the status of the transaction.
+    pub async fn status(&self) -> Result<Poll<ExecutionFinalResult>> {
+        let result = self
+            .client
+            .tx_async_status(&self.sender_id, self.hash)
+            .await
+            .map(ExecutionFinalResult::from_view);
+
+        match result {
+            Ok(result) => Ok(Poll::Ready(result)),
+            Err(err) => match err {
+                Error::RpcTransactionError(JsonRpcError::ServerError(
+                    JsonRpcServerError::HandlerError(RpcTransactionError::UnknownTransaction {
+                        ..
+                    }),
+                )) => Ok(Poll::Pending),
+                other => Err(other),
+            },
+        }
+    }
+
+    /// Wait until the completion of the transaction by polling [`AsyncTransactionStatus::status`].
+    pub(crate) async fn wait(self) -> Result<ExecutionFinalResult> {
+        loop {
+            match self.status().await? {
+                Poll::Ready(val) => break Ok(val),
+                Poll::Pending => (),
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+
+    /// Get the [`AccountId`] of the account that initiated this transaction.
+    pub fn sender_id(&self) -> &AccountId {
+        &self.sender_id
+    }
+
+    /// Reference [`CryptoHash`] to the submitted transaction, pending completion.
+    pub fn hash(&self) -> &CryptoHash {
+        &self.hash
+    }
+}
+
+impl fmt::Debug for AsyncTransactionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransactionStatus")
+            .field("sender_id", &self.sender_id)
+            .field("hash", &self.hash)
+            .finish()
+    }
+}
+
+impl std::future::IntoFuture for AsyncTransactionStatus {
+    type Output = Result<ExecutionFinalResult>;
+    type IntoFuture = BoxFuture<'static, Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async { self.wait().await })
     }
 }
