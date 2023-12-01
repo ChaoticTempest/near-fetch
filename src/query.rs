@@ -157,7 +157,7 @@ pub struct GasPrice;
 
 impl ProcessQuery for ViewFunction {
     type Method = methods::query::RpcQueryRequest;
-    type Output = CallResult;
+    type Output = ViewResult;
 
     fn into_request(self, block_reference: BlockReference) -> Result<Self::Method> {
         Ok(Self::Method {
@@ -172,7 +172,7 @@ impl ProcessQuery for ViewFunction {
 
     fn from_response(resp: RpcQueryResponse) -> Result<Self::Output> {
         match resp.kind {
-            QueryResponseKind::CallResult(result) => Ok(result),
+            QueryResponseKind::CallResult(result) => Ok(result.into()),
             _ => Err(Error::RpcReturnedInvalidData(
                 "while querying account".into(),
             )),
@@ -452,6 +452,44 @@ impl<'a> std::future::IntoFuture for QueryChunk<'a> {
 
             Ok(chunk_view)
         })
+    }
+}
+
+/// The result from a call into a View function. This contains the contents or
+/// the results from the view function call itself. The consumer of this object
+/// can choose how to deserialize its contents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ViewResult {
+    /// Our result from our call into a view function.
+    pub result: Vec<u8>,
+    /// Logs generated from the view function.
+    pub logs: Vec<String>,
+}
+
+impl ViewResult {
+    /// Deserialize an instance of type `T` from bytes of JSON text sourced from the
+    /// execution result of this call. This conversion can fail if the structure of
+    /// the internal state does not meet up with [`serde::de::DeserializeOwned`]'s
+    /// requirements.
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
+        Ok(serde_json::from_slice(&self.result)?)
+    }
+
+    /// Deserialize an instance of type `T` from bytes sourced from this view call's
+    /// result. This conversion can fail if the structure of the internal state does
+    /// not meet up with [`borsh::BorshDeserialize`]'s requirements.
+    pub fn borsh<T: borsh::BorshDeserialize>(&self) -> Result<T> {
+        Ok(borsh::BorshDeserialize::try_from_slice(&self.result)?)
+    }
+}
+
+impl From<CallResult> for ViewResult {
+    fn from(result: CallResult) -> Self {
+        Self {
+            result: result.result,
+            logs: result.logs,
+        }
     }
 }
 
