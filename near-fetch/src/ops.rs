@@ -202,7 +202,7 @@ impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
     /// Retry this transactions if it fails. This will retry the transaction with exponential
     /// backoff.
     pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
-        self.retry_with(
+        self.retry(
             ExponentialBackoff::from_millis(base_millis)
                 .map(jitter)
                 .take(max_retries),
@@ -211,7 +211,7 @@ impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
 
     /// Retry this transactions if it fails. This will retry the transaction with the provided
     /// retry strategy.
-    pub fn retry_with(
+    pub fn retry(
         mut self,
         strategy: impl Iterator<Item = Duration> + Send + Sync + 'static,
     ) -> Self {

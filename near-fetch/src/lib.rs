@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use ops::RetryableTransaction;
-use signer::SignerExt;
 use tokio::sync::RwLock;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
@@ -33,6 +31,8 @@ pub mod result;
 pub mod signer;
 
 use crate::error::Result;
+use crate::ops::RetryableTransaction;
+use crate::signer::SignerExt;
 
 pub use crate::error::Error;
 
