@@ -30,7 +30,7 @@ pub(crate) type BoxFuture<'a, T> =
 /// `Query` object allows creating queries into the network of our choice. This object is
 /// usually given from making calls from other functions such as [`view_state`].
 ///
-/// [`view_state`]: crate::worker::Worker::view_state
+/// [`view_state`]: Client::view_state
 pub struct Query<'a, T> {
     pub(crate) method: T,
     pub(crate) client: &'a Client,
@@ -103,24 +103,21 @@ where
 }
 
 // Note: this trait is exposed publicly due to constraining with the impl offering `finality`.
-/// Trait used as a converter from WorkspaceRequest to near-rpc request, and from near-rpc
-/// response to a WorkspaceResult. Mostly used internally to facilitate syntax sugar for performing
-/// RPC requests with async builders.
+/// Trait used as a high level APIs for consistent usages of block reference. Mostly used
+/// internally to facilitate syntax sugar for performing RPC requests with async builders.
 pub trait ProcessQuery {
     // TODO: associated default type is unstable. So for now, will require writing
     // the manual impls for query_request
     /// Method for doing the internal RPC request to the network of our choosing.
     type Method: RpcMethod;
 
-    /// Expected output after performing a query. This is mainly to convert over
-    /// the type from near-primitives to a workspace type.
+    /// Expected output after performing a query.
     type Output;
 
     /// Convert into the Request object that is required to perform the RPC request.
     fn into_request(self, block_ref: BlockReference) -> Result<Self::Method>;
 
-    /// Convert the response from the RPC request to a type of our choosing, mainly to conform
-    /// to workspaces related types from the near-primitives or json types from the network.
+    /// Convert the response from the RPC request to a type of our choosing.
     fn from_response(resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output>;
 }
 
