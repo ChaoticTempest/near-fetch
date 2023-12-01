@@ -1,5 +1,7 @@
 //! All operation types that are generated/used when commiting transactions to the network.
 
+use std::time::Duration;
+
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use near_gas::NearGas;
@@ -12,7 +14,10 @@ use near_primitives::transaction::{
 };
 use near_primitives::views::FinalExecutionOutcomeView;
 use near_token::NearToken;
+use tokio_retry::strategy::{jitter, ExponentialBackoff};
+use tokio_retry::Retry;
 
+use crate::query::BoxFuture;
 use crate::result::ExecutionFinalResult;
 use crate::signer::SignerExt;
 use crate::{Client, Error, Result};
@@ -116,6 +121,7 @@ pub struct FunctionCallTransaction<'a, 'b> {
     pub(crate) signer: &'b dyn SignerExt,
     pub(crate) receiver_id: AccountId,
     pub(crate) function: Function,
+    pub(crate) retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
 }
 
 impl FunctionCallTransaction<'_, '_> {
@@ -164,14 +170,18 @@ impl FunctionCallTransaction<'_, '_> {
 impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
     /// Process the transaction, and return the result of the execution.
     pub async fn transact(self) -> Result<ExecutionFinalResult> {
-        self.client
-            .send_tx(
-                self.signer,
-                &self.receiver_id,
-                vec![self.function.into_action()?.into()],
-            )
-            .await
-            .map(ExecutionFinalResult::from_view)
+        RetryableTransaction {
+            client: self.client.clone(),
+            signer: self.signer,
+            receiver_id: self.receiver_id,
+            actions: self
+                .function
+                .into_action()
+                .map(|action| vec![action.into()]),
+            strategy: self.retry_strategy,
+        }
+        .await
+        .map(ExecutionFinalResult::from_view)
     }
 
     /// Send the transaction to the network to be processed. This will be done asynchronously
@@ -188,6 +198,26 @@ impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
             )
             .await
     }
+
+    /// Retry this transactions if it fails. This will retry the transaction with exponential
+    /// backoff.
+    pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
+        self.retry_with(
+            ExponentialBackoff::from_millis(base_millis)
+                .map(jitter)
+                .take(max_retries),
+        )
+    }
+
+    /// Retry this transactions if it fails. This will retry the transaction with the provided
+    /// retry strategy.
+    pub fn retry_with(
+        mut self,
+        strategy: impl Iterator<Item = Duration> + Send + Sync + 'static,
+    ) -> Self {
+        self.retry_strategy = Some(Box::new(strategy));
+        self
+    }
 }
 
 /// A builder-like object that will allow specifying various actions to be performed
@@ -201,6 +231,7 @@ pub struct Transaction<'a, 'b> {
     receiver_id: AccountId,
     // Result used to defer errors in argument parsing to later when calling into transact
     actions: Result<Vec<Action>>,
+    retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
 }
 
 impl<'a, 'b> Transaction<'a, 'b> {
@@ -214,14 +245,20 @@ impl<'a, 'b> Transaction<'a, 'b> {
             signer,
             receiver_id,
             actions: Ok(Vec::new()),
+            retry_strategy: None,
         }
     }
 
     /// Process the transaction, and return the result of the execution.
     pub async fn transact(self) -> Result<FinalExecutionOutcomeView> {
-        self.client
-            .send_tx(self.signer, &self.receiver_id, self.actions?)
-            .await
+        RetryableTransaction {
+            client: self.client.clone(),
+            signer: self.signer,
+            receiver_id: self.receiver_id,
+            actions: self.actions,
+            strategy: self.retry_strategy,
+        }
+        .await
     }
 
     /// Send the transaction to the network to be processed. This will be done asynchronously
@@ -337,6 +374,78 @@ impl Transaction<'_, '_> {
         }
         self
     }
+
+    /// Retry this transactions if it fails. This will retry the transaction with exponential
+    /// backoff.
+    pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
+        self.retry(
+            ExponentialBackoff::from_millis(base_millis)
+                .map(jitter)
+                .take(max_retries),
+        )
+    }
+
+    /// Retry this transactions if it fails. This will retry the transaction with the provided
+    /// retry strategy.
+    pub fn retry(
+        mut self,
+        strategy: impl Iterator<Item = Duration> + Send + Sync + 'static,
+    ) -> Self {
+        self.retry_strategy = Some(Box::new(strategy));
+        self
+    }
+}
+
+pub struct RetryableTransaction<'a> {
+    pub(crate) client: Client,
+    pub(crate) signer: &'a dyn SignerExt,
+    pub(crate) receiver_id: AccountId,
+    pub(crate) actions: Result<Vec<Action>>,
+    pub(crate) strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
+}
+
+impl RetryableTransaction<'_> {
+    /// Retry this transactions if it fails. This will retry the transaction with exponential
+    /// backoff.
+    pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
+        self.retry(
+            ExponentialBackoff::from_millis(base_millis)
+                .map(jitter)
+                .take(max_retries),
+        )
+    }
+
+    /// Retry this transactions if it fails. This will retry the transaction with the provided
+    /// retry strategy.
+    pub fn retry(
+        mut self,
+        strategy: impl Iterator<Item = Duration> + Send + Sync + 'static,
+    ) -> Self {
+        self.strategy = Some(Box::new(strategy));
+        self
+    }
+}
+
+impl<'a> std::future::IntoFuture for RetryableTransaction<'a> {
+    type Output = Result<FinalExecutionOutcomeView>;
+    type IntoFuture = BoxFuture<'a, Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let actions = self.actions?;
+            let action = || async {
+                self.client
+                    .send_tx_once(self.signer, &self.receiver_id, actions.clone())
+                    .await
+            };
+
+            if let Some(strategy) = self.strategy {
+                Retry::spawn(strategy, action).await
+            } else {
+                action().await
+            }
+        })
+    }
 }
 
 impl Client {
@@ -353,6 +462,7 @@ impl Client {
             signer,
             receiver_id: contract_id.clone(),
             function: Function::new(function),
+            retry_strategy: None,
         }
     }
 
