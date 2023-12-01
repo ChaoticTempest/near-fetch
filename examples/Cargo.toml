@@ -1,0 +1,22 @@
+[package]
+name = "examples"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dev-dependencies]
+anyhow = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+near-account-id = "0.17"
+near-crypto = "0.17"
+near-fetch = { path = "../near-fetch" }
+near-primitives = "0.17"
+
+[[example]]
+name = "various_views"
+path = "src/various_views.rs"
+
+[[example]]
+name = "social_call"
+path = "src/social_call.rs"

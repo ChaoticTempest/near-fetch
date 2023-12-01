@@ -1,7 +1,7 @@
 //! All operation types that are generated/used when commiting transactions to the network.
 
 use near_account_id::AccountId;
-use near_crypto::{PublicKey, Signer};
+use near_crypto::PublicKey;
 use near_gas::NearGas;
 use near_primitives::account::AccessKey;
 use near_primitives::borsh;
@@ -14,7 +14,7 @@ use near_primitives::views::FinalExecutionOutcomeView;
 use near_token::NearToken;
 
 use crate::result::ExecutionFinalResult;
-use crate::signer::ExposeAccountId;
+use crate::signer::SignerExt;
 use crate::{Client, Error, Result};
 
 /// Maximum amount of gas that can be used in a single transaction.
@@ -111,14 +111,14 @@ impl Function {
     }
 }
 
-pub struct FunctionCallTransaction<'a, S> {
+pub struct FunctionCallTransaction<'a, 'b> {
     pub(crate) client: &'a Client,
-    pub(crate) signer: S,
+    pub(crate) signer: &'b dyn SignerExt,
     pub(crate) receiver_id: AccountId,
     pub(crate) function: Function,
 }
 
-impl<S> FunctionCallTransaction<'_, S> {
+impl FunctionCallTransaction<'_, '_> {
     /// Provide the arguments for the call. These args are serialized bytes from either
     /// a JSON or Borsh serializable set of arguments. To use the more specific versions
     /// with better quality of life, use `args_json` or `args_borsh`.
@@ -161,15 +161,12 @@ impl<S> FunctionCallTransaction<'_, S> {
     }
 }
 
-impl<'a, S> FunctionCallTransaction<'a, S>
-where
-    S: Signer + ExposeAccountId + 'static,
-{
+impl<'a, 'b> FunctionCallTransaction<'a, 'b> {
     /// Process the transaction, and return the result of the execution.
     pub async fn transact(self) -> Result<ExecutionFinalResult> {
         self.client
             .send_tx(
-                &self.signer,
+                self.signer,
                 &self.receiver_id,
                 vec![self.function.into_action()?.into()],
             )
@@ -185,7 +182,7 @@ where
     pub async fn transact_async(self) -> Result<CryptoHash> {
         self.client
             .send_tx_async(
-                &self.signer,
+                self.signer,
                 &self.receiver_id,
                 vec![self.function.into_action()?.into()],
             )
@@ -198,19 +195,20 @@ where
 /// [NEAR transactions](https://docs.near.org/docs/concepts/transaction).
 ///
 /// All actions are performed on the account specified by `receiver_id`.
-pub struct Transaction<'a, S> {
+pub struct Transaction<'a, 'b> {
     client: &'a Client,
-    signer: S,
+    signer: &'b dyn SignerExt,
     receiver_id: AccountId,
     // Result used to defer errors in argument parsing to later when calling into transact
     actions: Result<Vec<Action>>,
 }
 
-impl<'a, S> Transaction<'a, S>
-where
-    S: Signer + ExposeAccountId + 'static,
-{
-    pub(crate) fn new(client: &'a Client, signer: S, receiver_id: AccountId) -> Self {
+impl<'a, 'b> Transaction<'a, 'b> {
+    pub(crate) fn new(
+        client: &'a Client,
+        signer: &'b dyn SignerExt,
+        receiver_id: AccountId,
+    ) -> Self {
         Self {
             client,
             signer,
@@ -222,25 +220,20 @@ where
     /// Process the transaction, and return the result of the execution.
     pub async fn transact(self) -> Result<FinalExecutionOutcomeView> {
         self.client
-            .send_tx(&self.signer, &self.receiver_id, self.actions?)
+            .send_tx(self.signer, &self.receiver_id, self.actions?)
             .await
     }
 
     /// Send the transaction to the network to be processed. This will be done asynchronously
-    /// without waiting for the transaction to complete. This returns us a [`TransactionStatus`]
-    /// for which we can call into [`status`] and/or `.await` to retrieve info about whether
-    /// the transaction has been completed or not. Note that `.await` will wait till completion
-    /// of the transaction.
-    ///
-    /// [`status`]: TransactionStatus::status
+    /// without waiting for the transaction to complete.
     pub async fn transact_async(self) -> Result<CryptoHash> {
         self.client
-            .send_tx_async(&self.signer, &self.receiver_id, self.actions?)
+            .send_tx_async(self.signer, &self.receiver_id, self.actions?)
             .await
     }
 }
 
-impl<S> Transaction<'_, S> {
+impl Transaction<'_, '_> {
     /// Adds a key to the `receiver_id`'s account, where the public key can be used
     /// later to delete the same key.
     pub fn add_key(mut self, pk: PublicKey, ak: AccessKey) -> Self {
@@ -349,12 +342,12 @@ impl<S> Transaction<'_, S> {
 impl Client {
     /// Start calling into a contract on a specific function. Returns a [`FunctionCallTransaction`]
     /// object where we can use to add more parameters such as the arguments, deposit, and gas.
-    pub fn call<S: Signer + ExposeAccountId>(
+    pub fn call<'b>(
         &self,
-        signer: S,
+        signer: &'b dyn SignerExt,
         contract_id: &AccountId,
         function: &str,
-    ) -> FunctionCallTransaction<'_, S> {
+    ) -> FunctionCallTransaction<'_, 'b> {
         FunctionCallTransaction {
             client: self,
             signer,
@@ -366,12 +359,12 @@ impl Client {
     /// Start a batch transaction. Returns a [`Transaction`] object that we can
     /// use to add Actions to the batched transaction. Call `transact` to send
     /// the batched transaction to the network.
-    pub fn batch<S: Signer + ExposeAccountId + 'static>(
+    pub fn batch<'b>(
         &self,
-        signer: S,
+        signer: &'b dyn SignerExt,
         contract_id: &AccountId,
         function: &str,
-    ) -> Transaction<'_, S> {
+    ) -> Transaction<'_, 'b> {
         Transaction::new(self, signer, contract_id.clone()).call(Function::new(function))
     }
 }

@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use signer::SignerExt;
 use tokio::sync::RwLock;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
 
 use near_account_id::AccountId;
-use near_crypto::{PublicKey, Signer};
+use near_crypto::PublicKey;
 use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
 use near_jsonrpc_client::methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest;
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
@@ -27,11 +28,10 @@ use near_primitives::views::{
 pub mod error;
 pub mod ops;
 pub mod query;
-pub mod signer;
 pub mod result;
+pub mod signer;
 
 use crate::error::Result;
-use crate::signer::ExposeAccountId;
 
 pub use crate::error::Error;
 
@@ -78,9 +78,9 @@ impl Client {
     }
 
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network.
-    pub async fn send_tx<T: Signer + ExposeAccountId>(
+    pub async fn send_tx(
         &self,
-        signer: &T,
+        signer: &dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
     ) -> Result<FinalExecutionOutcomeView> {
@@ -101,7 +101,7 @@ impl Client {
                         receiver_id: receiver_id.clone(),
                         actions: actions.clone(),
                     }
-                    .sign(signer),
+                    .sign(signer.as_signer()),
                 })
                 .await;
 
@@ -114,9 +114,9 @@ impl Client {
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network. This is an async
     /// operation, where a hash is returned to reference the transaction in the future and check
     /// its status.
-    pub async fn send_tx_async<T: Signer + ExposeAccountId>(
+    pub async fn send_tx_async(
         &self,
-        signer: &T,
+        signer: &dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
     ) -> Result<CryptoHash> {
@@ -137,7 +137,7 @@ impl Client {
                         receiver_id: receiver_id.clone(),
                         actions: actions.clone(),
                     }
-                    .sign(signer),
+                    .sign(signer.as_signer()),
                 })
                 .await;
 
