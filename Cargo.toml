@@ -12,6 +12,7 @@ High level client library for transacting to the NEAR network.
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+base64 = "0.21"
 serde = "1.0"
 serde_json = "1.0"
 thiserror = "1"
