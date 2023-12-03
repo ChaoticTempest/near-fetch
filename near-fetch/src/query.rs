@@ -152,6 +152,11 @@ pub struct ViewAccessKeyList {
 
 pub struct GasPrice;
 
+pub struct ViewCachedAccessKey {
+    pub(crate) account_id: AccountId,
+    pub(crate) public_key: PublicKey,
+}
+
 impl ProcessQuery for ViewFunction {
     type Method = methods::query::RpcQueryRequest;
     type Output = ViewResult;

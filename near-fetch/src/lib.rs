@@ -289,26 +289,27 @@ async fn fetch_nonce(
     account_id: &AccountId,
     public_key: &PublicKey,
 ) -> Result<(Nonce, CryptoHash, BlockHeight)> {
-    let cache_key = (account_id.clone(), public_key.clone());
     let nonces = client.access_key_nonces.read().await;
+    let cache_key = (account_id.clone(), public_key.clone());
     if let Some(nonce) = nonces.get(&cache_key) {
-        cached_nonce(nonce, client).await
-    } else {
+        let nonce = nonce.fetch_add(1, Ordering::SeqCst);
         drop(nonces);
-        let mut nonces = client.access_key_nonces.write().await;
-        match nonces.entry(cache_key) {
-            // case where multiple writers end up at the same lock acquisition point and tries
-            // to overwrite the cached value that a previous writer already wrote.
-            Entry::Occupied(entry) => cached_nonce(entry.get(), client).await,
 
-            // Write the cached value. This value will get invalidated when an InvalidNonce error is returned.
-            Entry::Vacant(entry) => {
-                let (account_id, public_key) = entry.key();
-                let (access_key, block_hash, block_height) =
-                    client.access_key(account_id, public_key).await?;
-                entry.insert(AtomicU64::new(access_key.nonce + 1));
-                Ok((access_key.nonce + 1, block_hash, block_height))
-            }
-        }
+        // Fetch latest block_hash since the previous one is now invalid for new transactions:
+        let block = client.view_block().await?;
+        return Ok((nonce + 1, block.header.hash, block.header.height));
     }
+    drop(nonces);
+
+    let (access_key, block_hash, block_height) = client.access_key(account_id, public_key).await?;
+    let nonce = client
+        .access_key_nonces
+        .write()
+        .await
+        .entry(cache_key)
+        .or_insert_with(|| AtomicU64::new(access_key.nonce + 1))
+        .fetch_max(access_key.nonce + 1, Ordering::SeqCst)
+        .max(access_key.nonce + 1);
+
+    Ok((nonce, block_hash, block_height))
 }
