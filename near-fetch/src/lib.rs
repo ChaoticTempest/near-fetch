@@ -152,7 +152,7 @@ impl Client {
         // Note, the cache key's public-key part can be different per retry loop. For instance,
         // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
         let cache_key = (signer.account_id().clone(), signer.public_key());
-        let wait_until_param = wait_until.unwrap_or(TxExecutionStatus::None); // Default equal to legacy broadcast_tx_async
+        let wait_until_param = wait_until.unwrap_or(TxExecutionStatus::Included); // Default equal to legacy broadcast_tx_async
 
         let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
         let result = self
