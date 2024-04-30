@@ -84,6 +84,7 @@ impl Client {
         signer: &'a dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
+        wait_until: Option<TxExecutionStatus>,
     ) -> RetryableTransaction<'a> {
         RetryableTransaction {
             client: self.clone(),
@@ -91,6 +92,7 @@ impl Client {
             actions: Ok(actions),
             receiver_id: receiver_id.clone(),
             strategy: None,
+            wait_until: wait_until.clone(),
         }
     }
 

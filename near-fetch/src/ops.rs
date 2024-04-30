@@ -126,6 +126,7 @@ pub struct FunctionCallTransaction<'a> {
     pub(crate) receiver_id: AccountId,
     pub(crate) function: Function,
     pub(crate) retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
+    pub(crate) wait_until: Option<TxExecutionStatus>,
 }
 
 impl FunctionCallTransaction<'_> {
@@ -183,6 +184,7 @@ impl<'a> FunctionCallTransaction<'a> {
                 .into_action()
                 .map(|action| vec![action.into()]),
             strategy: self.retry_strategy,
+            wait_until: self.wait_until,
         }
         .await
         .map(ExecutionFinalResult::from_view)
@@ -244,6 +246,7 @@ pub struct Transaction<'a> {
     // Result used to defer errors in argument parsing to later when calling into transact
     actions: Result<Vec<Action>>,
     retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
+    wait_until: Option<TxExecutionStatus>,
 }
 
 impl<'a> Transaction<'a> {
@@ -254,6 +257,7 @@ impl<'a> Transaction<'a> {
             receiver_id,
             actions: Ok(Vec::new()),
             retry_strategy: None,
+            wait_until: None,
         }
     }
 
@@ -265,6 +269,7 @@ impl<'a> Transaction<'a> {
             receiver_id: self.receiver_id,
             actions: self.actions,
             strategy: self.retry_strategy,
+            wait_until: self.wait_until,
         }
         .await
     }
@@ -417,6 +422,7 @@ pub struct RetryableTransaction<'a> {
     pub(crate) receiver_id: AccountId,
     pub(crate) actions: Result<Vec<Action>>,
     pub(crate) strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
+    pub(crate) wait_until: Option<TxExecutionStatus>,
 }
 
 impl RetryableTransaction<'_> {
@@ -450,7 +456,12 @@ impl<'a> std::future::IntoFuture for RetryableTransaction<'a> {
             let actions = self.actions?;
             let action = || async {
                 self.client
-                    .send_tx_once(self.signer, &self.receiver_id, actions.clone(), None)
+                    .send_tx_once(
+                        self.signer,
+                        &self.receiver_id,
+                        actions.clone(),
+                        self.wait_until.clone(),
+                    )
                     .await
             };
 
@@ -478,6 +489,7 @@ impl Client {
             receiver_id: contract_id.clone(),
             function: Function::new(function),
             retry_strategy: None,
+            wait_until: None,
         }
     }
 

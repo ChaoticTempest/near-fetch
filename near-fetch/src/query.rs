@@ -16,8 +16,7 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::types::{BlockHeight, BlockId, BlockReference, Finality, ShardId, StoreKey};
 use near_primitives::views::{
     AccessKeyList, AccessKeyView, AccountView, BlockView, CallResult, ChunkView,
-    FinalExecutionOutcomeView, FinalExecutionOutcomeViewEnum, QueryRequest, TxExecutionStatus,
-    ViewStateResult,
+    FinalExecutionOutcomeView, QueryRequest, TxExecutionStatus, ViewStateResult,
 };
 use near_token::NearToken;
 
