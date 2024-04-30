@@ -166,6 +166,11 @@ impl Client {
             })
             .await;
 
+        if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(_err))) = &result {
+            // RpcBroadcastTxAsyncError should not be returned. If it does, invalidate the cache just in case.
+            self.invalidate_cache(&cache_key).await;
+        }
+
         let outcome = result
             .map_err::<Error, _>(Into::into)
             .unwrap()
