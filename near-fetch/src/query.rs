@@ -16,7 +16,8 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::types::{BlockHeight, BlockId, BlockReference, Finality, ShardId, StoreKey};
 use near_primitives::views::{
     AccessKeyList, AccessKeyView, AccountView, BlockView, CallResult, ChunkView,
-    FinalExecutionOutcomeView, QueryRequest, ViewStateResult,
+    FinalExecutionOutcomeView, FinalExecutionOutcomeViewEnum, QueryRequest, TxExecutionStatus,
+    ViewStateResult,
 };
 use near_token::NearToken;
 
@@ -591,14 +592,28 @@ impl Client {
         sender_id: &AccountId,
         tx_hash: CryptoHash,
     ) -> Result<FinalExecutionOutcomeView> {
-        self.rpc_client
+        let response = self
+            .rpc_client
             .call(methods::tx::RpcTransactionStatusRequest {
                 transaction_info: methods::tx::TransactionInfo::TransactionId {
-                    account_id: sender_id.clone(),
-                    hash: tx_hash,
+                    sender_account_id: sender_id.clone(),
+                    tx_hash,
                 },
+                wait_until: TxExecutionStatus::Executed,
             })
             .await
-            .map_err(Into::into)
+            .map_err(|e| Error::RpcTransactionError(e.into()))?;
+
+        match response.final_execution_outcome {
+            Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(outcome)) => Ok(outcome),
+            Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcomeWithReceipt(outcome)) => {
+                // Assuming you want to extract FinalExecutionOutcomeView from this variant
+                // You will need to adapt this depending on the actual structure of FinalExecutionOutcomeWithReceiptView.
+                Ok(outcome.final_outcome)
+            }
+            None => Err(Error::RpcReturnedInvalidData(
+                "No final execution outcome available".into(),
+            )),
+        }
     }
 }
