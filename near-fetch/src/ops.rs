@@ -16,7 +16,7 @@ use near_primitives::transaction::{
     Action, AddKeyAction, CreateAccountAction, DeleteAccountAction, DeleteKeyAction,
     DeployContractAction, FunctionCallAction, StakeAction, TransferAction,
 };
-use near_primitives::views::FinalExecutionOutcomeView;
+use near_primitives::views::{FinalExecutionOutcomeView, TxExecutionStatus};
 use near_token::NearToken;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
@@ -200,6 +200,7 @@ impl<'a> FunctionCallTransaction<'a> {
                 self.signer,
                 &self.receiver_id,
                 vec![self.function.into_action()?.into()],
+                None,
             )
             .await?;
 
@@ -273,7 +274,7 @@ impl<'a> Transaction<'a> {
     pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
         let hash = self
             .client
-            .send_tx_async(self.signer, &self.receiver_id, self.actions?)
+            .send_tx_async(self.signer, &self.receiver_id, self.actions?, None)
             .await?;
 
         Ok(AsyncTransactionStatus::new(
@@ -449,7 +450,7 @@ impl<'a> std::future::IntoFuture for RetryableTransaction<'a> {
             let actions = self.actions?;
             let action = || async {
                 self.client
-                    .send_tx_once(self.signer, &self.receiver_id, actions.clone())
+                    .send_tx_once(self.signer, &self.receiver_id, actions.clone(), None)
                     .await
             };
 
@@ -519,7 +520,11 @@ impl AsyncTransactionStatus {
     pub async fn status(&self) -> Result<Poll<ExecutionFinalResult>> {
         let result = self
             .client
-            .tx_async_status(&self.sender_id, self.hash)
+            .tx_async_status(
+                &self.sender_id,
+                self.hash,
+                Some(TxExecutionStatus::Executed),
+            )
             .await
             .map(ExecutionFinalResult::from_view);
 
