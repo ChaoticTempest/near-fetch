@@ -128,12 +128,15 @@ impl Client {
         self.check_and_invalidate_cache(&cache_key, &result).await;
 
         let outcome = result
-            .map_err::<Error, _>(Into::into)
-            .unwrap()
-            .final_execution_outcome
-            .unwrap()
-            .into_outcome();
-        Ok(outcome)
+            .map_err(Error::from) // Converts JsonRpcError<T> to your custom Error type using the #[from] attributes.
+            .and_then(|rpc_response| {
+                rpc_response.final_execution_outcome.ok_or_else(|| {
+                    Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
+                })
+            })
+            .map(|outcome| outcome.into_outcome());
+
+        Ok(outcome?)
     }
 
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network. This is an async
@@ -173,13 +176,16 @@ impl Client {
             self.invalidate_cache(&cache_key).await;
         }
 
-        let outcome = result
-            .map_err::<Error, _>(Into::into)
-            .unwrap()
-            .final_execution_outcome
-            .unwrap()
-            .into_outcome();
-        Ok(outcome.transaction.hash)
+        let transaction_hash = result
+            .map_err(Error::from) // Automatically converts JsonRpcError<T> to the appropriate Error variant.
+            .and_then(|rpc_response| {
+                rpc_response.final_execution_outcome.ok_or_else(|| {
+                    Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
+                })
+            })
+            .map(|outcome| outcome.into_outcome().transaction.hash);
+
+        Ok(transaction_hash?)
     }
 
     /// Send a JsonRpc method to the network.

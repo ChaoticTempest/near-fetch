@@ -591,7 +591,7 @@ impl Client {
         sender_id: &AccountId,
         tx_hash: CryptoHash,
         wait_until: Option<TxExecutionStatus>,
-    ) -> Result<FinalExecutionOutcomeView> {
+    ) -> Result<FinalExecutionOutcomeView, Error> {
         let wait_until_param = wait_until.unwrap_or(TxExecutionStatus::Executed);
 
         let response = self
@@ -604,8 +604,12 @@ impl Client {
                 wait_until: wait_until_param,
             })
             .await
-            .map_err(|e| Error::RpcTransactionError(e.into()))?;
+            .map_err(Error::RpcTransactionError)?;
 
-        Ok(response.final_execution_outcome.unwrap().into_outcome())
+        let outcome = response.final_execution_outcome.ok_or_else(|| {
+            Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
+        })?;
+
+        Ok(outcome.into_outcome())
     }
 }
