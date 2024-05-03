@@ -85,7 +85,7 @@ impl Function {
     /// Similar to `args`, specify an argument that is borsh serializable and can be
     /// accepted by the equivalent contract.
     pub fn args_borsh<U: borsh::BorshSerialize>(mut self, args: U) -> Self {
-        match args.try_to_vec() {
+        match borsh::to_vec(&args) {
             Ok(args) => self.args = Ok(args),
             Err(e) => self.args = Err(Error::Io(e)),
         }
@@ -312,12 +312,12 @@ impl Transaction<'_> {
         };
 
         if let Ok(actions) = &mut self.actions {
-            actions.push(Action::FunctionCall(FunctionCallAction {
+            actions.push(Action::FunctionCall(Box::new(FunctionCallAction {
                 method_name: function.name.to_string(),
                 args,
                 deposit: function.deposit.as_yoctonear(),
                 gas: function.gas.as_gas(),
-            }));
+            })));
         }
 
         self

@@ -594,8 +594,8 @@ impl Client {
         self.rpc_client
             .call(methods::tx::RpcTransactionStatusRequest {
                 transaction_info: methods::tx::TransactionInfo::TransactionId {
-                    account_id: sender_id.clone(),
-                    hash: tx_hash,
+                    sender_account_id: sender_id.clone(),
+                    tx_hash,
                 },
             })
             .await
