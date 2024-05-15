@@ -147,22 +147,25 @@ impl Client {
         // Note, the cache key's public-key part can be different per retry loop. For instance,
         // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
         let cache_key = (signer.account_id().clone(), signer.public_key());
-        let wait_until_param = wait_until.unwrap_or(TxExecutionStatus::Included); // Default equal to legacy broadcast_tx_async
+        let wait_until = wait_until.unwrap_or(TxExecutionStatus::None); // Default equal to legacy broadcast_tx_async
 
         let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
+        let signed_transaction = Transaction {
+            nonce,
+            block_hash,
+            signer_id: signer.account_id().clone(),
+            public_key: signer.public_key(),
+            receiver_id: receiver_id.clone(),
+            actions: actions.clone(),
+        }
+        .sign(signer.as_signer());
+        let tx_hash = signed_transaction.get_hash();
+
         let result = self
             .rpc_client
             .call(&methods::send_tx::RpcSendTransactionRequest {
-                signed_transaction: Transaction {
-                    nonce,
-                    block_hash,
-                    signer_id: signer.account_id().clone(),
-                    public_key: signer.public_key(),
-                    receiver_id: receiver_id.clone(),
-                    actions: actions.clone(),
-                }
-                .sign(signer.as_signer()),
-                wait_until: wait_until_param,
+                signed_transaction,
+                wait_until,
             })
             .await;
 
@@ -171,16 +174,8 @@ impl Client {
             self.invalidate_cache(&cache_key).await;
         }
 
-        let transaction_hash = result
-            .map_err(Error::from) // Automatically converts JsonRpcError<T> to the appropriate Error variant.
-            .and_then(|rpc_response| {
-                rpc_response.final_execution_outcome.ok_or_else(|| {
-                    Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
-                })
-            })
-            .map(|outcome| outcome.into_outcome().transaction.hash);
-
-        transaction_hash
+        result.map_err(Error::from)?;
+        Ok(tx_hash)
     }
 
     /// Send a JsonRpc method to the network.

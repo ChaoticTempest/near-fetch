@@ -592,7 +592,7 @@ impl Client {
         tx_hash: CryptoHash,
         wait_until: Option<TxExecutionStatus>,
     ) -> Result<FinalExecutionOutcomeView, Error> {
-        let wait_until_param = wait_until.unwrap_or(TxExecutionStatus::Executed);
+        let wait_until = wait_until.unwrap_or_default();
 
         let response = self
             .rpc_client
@@ -601,7 +601,7 @@ impl Client {
                     sender_account_id: sender_id.clone(),
                     tx_hash,
                 },
-                wait_until: wait_until_param,
+                wait_until,
             })
             .await
             .map_err(Error::RpcTransactionError)?;
