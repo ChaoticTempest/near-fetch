@@ -16,7 +16,7 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::types::{BlockHeight, BlockId, BlockReference, Finality, ShardId, StoreKey};
 use near_primitives::views::{
     AccessKeyList, AccessKeyView, AccountView, BlockView, CallResult, ChunkView,
-    FinalExecutionOutcomeView, QueryRequest, ViewStateResult,
+    FinalExecutionOutcomeView, QueryRequest, TxExecutionStatus, ViewStateResult,
 };
 use near_token::NearToken;
 
@@ -590,15 +590,26 @@ impl Client {
         &self,
         sender_id: &AccountId,
         tx_hash: CryptoHash,
-    ) -> Result<FinalExecutionOutcomeView> {
-        self.rpc_client
+        wait_until: Option<TxExecutionStatus>,
+    ) -> Result<FinalExecutionOutcomeView, Error> {
+        let wait_until_param = wait_until.unwrap_or(TxExecutionStatus::Executed);
+
+        let response = self
+            .rpc_client
             .call(methods::tx::RpcTransactionStatusRequest {
                 transaction_info: methods::tx::TransactionInfo::TransactionId {
-                    account_id: sender_id.clone(),
-                    hash: tx_hash,
+                    sender_account_id: sender_id.clone(),
+                    tx_hash,
                 },
+                wait_until: wait_until_param,
             })
             .await
-            .map_err(Into::into)
+            .map_err(Error::RpcTransactionError)?;
+
+        let outcome = response.final_execution_outcome.ok_or_else(|| {
+            Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
+        })?;
+
+        Ok(outcome.into_outcome())
     }
 }

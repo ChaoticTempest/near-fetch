@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use near_jsonrpc_client::methods::tx::RpcTransactionResponse;
 use tokio::sync::RwLock;
 
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
-use near_jsonrpc_client::methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest;
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
 use near_jsonrpc_client::{methods, JsonRpcClient, MethodCallResult};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
@@ -18,8 +18,8 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::{Action, Transaction};
 use near_primitives::types::{BlockHeight, Finality, Nonce};
 use near_primitives::views::{
-    AccessKeyView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionStatus,
-    QueryRequest,
+    AccessKeyView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionOutcomeViewEnum,
+    FinalExecutionStatus, QueryRequest, TxExecutionStatus,
 };
 
 pub mod error;
@@ -84,6 +84,7 @@ impl Client {
         signer: &'a dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
+        wait_until: Option<TxExecutionStatus>,
     ) -> RetryableTransaction<'a> {
         RetryableTransaction {
             client: self.clone(),
@@ -91,6 +92,7 @@ impl Client {
             actions: Ok(actions),
             receiver_id: receiver_id.clone(),
             strategy: None,
+            wait_until,
         }
     }
 
@@ -100,13 +102,16 @@ impl Client {
         signer: &dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
+        wait_until: Option<TxExecutionStatus>,
     ) -> Result<FinalExecutionOutcomeView> {
         let cache_key = (signer.account_id().clone(), signer.public_key());
+        let wait_until = wait_until.unwrap_or(TxExecutionStatus::ExecutedOptimistic); // Default equal to legacy broadcast_tx_commit
 
         let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
+
         let result = self
             .rpc_client
-            .call(&RpcBroadcastTxCommitRequest {
+            .call(&methods::send_tx::RpcSendTransactionRequest {
                 signed_transaction: Transaction {
                     nonce,
                     block_hash,
@@ -116,11 +121,17 @@ impl Client {
                     actions: actions.clone(),
                 }
                 .sign(signer.as_signer()),
+                wait_until: wait_until,
             })
             .await;
 
         self.check_and_invalidate_cache(&cache_key, &result).await;
-        result.map_err(Into::into)
+
+        let rpc_response = result.map_err(Error::from)?;
+        let outcome = rpc_response.final_execution_outcome.ok_or_else(|| {
+            Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
+        })?;
+        Ok(outcome.into_outcome())
     }
 
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network. This is an async
@@ -131,15 +142,17 @@ impl Client {
         signer: &dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
+        wait_until: Option<TxExecutionStatus>,
     ) -> Result<CryptoHash> {
         // Note, the cache key's public-key part can be different per retry loop. For instance,
         // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
         let cache_key = (signer.account_id().clone(), signer.public_key());
+        let wait_until_param = wait_until.unwrap_or(TxExecutionStatus::Included); // Default equal to legacy broadcast_tx_async
 
         let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
         let result = self
             .rpc_client
-            .call(&methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest {
+            .call(&methods::send_tx::RpcSendTransactionRequest {
                 signed_transaction: Transaction {
                     nonce,
                     block_hash,
@@ -149,6 +162,7 @@ impl Client {
                     actions: actions.clone(),
                 }
                 .sign(signer.as_signer()),
+                wait_until: wait_until_param,
             })
             .await;
 
@@ -156,7 +170,17 @@ impl Client {
             // RpcBroadcastTxAsyncError should not be returned. If it does, invalidate the cache just in case.
             self.invalidate_cache(&cache_key).await;
         }
-        result.map_err(Into::into)
+
+        let transaction_hash = result
+            .map_err(Error::from) // Automatically converts JsonRpcError<T> to the appropriate Error variant.
+            .and_then(|rpc_response| {
+                rpc_response.final_execution_outcome.ok_or_else(|| {
+                    Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
+                })
+            })
+            .map(|outcome| outcome.into_outcome().transaction.hash);
+
+        transaction_hash
     }
 
     /// Send a JsonRpc method to the network.
@@ -211,7 +235,7 @@ impl Client {
     pub async fn check_and_invalidate_cache(
         &self,
         cache_key: &CacheKey,
-        result: &Result<FinalExecutionOutcomeView, JsonRpcError<RpcTransactionError>>,
+        result: &Result<RpcTransactionResponse, JsonRpcError<RpcTransactionError>>,
     ) {
         // InvalidNonce, cached nonce is potentially very far behind, so invalidate it.
         if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
@@ -253,23 +277,31 @@ impl From<Client> for JsonRpcClient {
     }
 }
 
-async fn fetch_tx_errs(result: &FinalExecutionOutcomeView) -> Vec<&TxExecutionError> {
+async fn fetch_tx_errs(result: &RpcTransactionResponse) -> Vec<&TxExecutionError> {
     let mut failures = Vec::new();
+    let Some(outcome) = result.final_execution_outcome.as_ref() else {
+        return failures;
+    };
+    let outcome = match outcome {
+        FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(outcome) => outcome,
+        FinalExecutionOutcomeViewEnum::FinalExecutionOutcomeWithReceipt(outcome) => {
+            &outcome.final_outcome
+        }
+    };
 
-    if let FinalExecutionStatus::Failure(tx_err) = &result.status {
+    if let FinalExecutionStatus::Failure(tx_err) = &outcome.status {
         failures.push(tx_err);
     }
-    if let ExecutionStatusView::Failure(tx_err) = &result.transaction_outcome.outcome.status {
+    if let ExecutionStatusView::Failure(tx_err) = &outcome.transaction_outcome.outcome.status {
         failures.push(tx_err);
     }
-    for receipt in &result.receipts_outcome {
+    for receipt in &outcome.receipts_outcome {
         if let ExecutionStatusView::Failure(tx_err) = &receipt.outcome.status {
             failures.push(tx_err);
         }
     }
     failures
 }
-
 async fn cached_nonce(
     nonce: &AtomicU64,
     client: &Client,

@@ -16,7 +16,7 @@ use near_primitives::transaction::{
     Action, AddKeyAction, CreateAccountAction, DeleteAccountAction, DeleteKeyAction,
     DeployContractAction, FunctionCallAction, StakeAction, TransferAction,
 };
-use near_primitives::views::FinalExecutionOutcomeView;
+use near_primitives::views::{FinalExecutionOutcomeView, TxExecutionStatus};
 use near_token::NearToken;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
@@ -85,7 +85,7 @@ impl Function {
     /// Similar to `args`, specify an argument that is borsh serializable and can be
     /// accepted by the equivalent contract.
     pub fn args_borsh<U: borsh::BorshSerialize>(mut self, args: U) -> Self {
-        match args.try_to_vec() {
+        match borsh::to_vec(&args) {
             Ok(args) => self.args = Ok(args),
             Err(e) => self.args = Err(Error::Io(e)),
         }
@@ -126,6 +126,7 @@ pub struct FunctionCallTransaction<'a> {
     pub(crate) receiver_id: AccountId,
     pub(crate) function: Function,
     pub(crate) retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
+    pub(crate) wait_until: Option<TxExecutionStatus>,
 }
 
 impl FunctionCallTransaction<'_> {
@@ -183,6 +184,7 @@ impl<'a> FunctionCallTransaction<'a> {
                 .into_action()
                 .map(|action| vec![action.into()]),
             strategy: self.retry_strategy,
+            wait_until: self.wait_until,
         }
         .await
         .map(ExecutionFinalResult::from_view)
@@ -200,6 +202,7 @@ impl<'a> FunctionCallTransaction<'a> {
                 self.signer,
                 &self.receiver_id,
                 vec![self.function.into_action()?.into()],
+                None,
             )
             .await?;
 
@@ -243,6 +246,7 @@ pub struct Transaction<'a> {
     // Result used to defer errors in argument parsing to later when calling into transact
     actions: Result<Vec<Action>>,
     retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
+    wait_until: Option<TxExecutionStatus>,
 }
 
 impl<'a> Transaction<'a> {
@@ -253,6 +257,7 @@ impl<'a> Transaction<'a> {
             receiver_id,
             actions: Ok(Vec::new()),
             retry_strategy: None,
+            wait_until: None,
         }
     }
 
@@ -264,6 +269,7 @@ impl<'a> Transaction<'a> {
             receiver_id: self.receiver_id,
             actions: self.actions,
             strategy: self.retry_strategy,
+            wait_until: self.wait_until,
         }
         .await
     }
@@ -273,7 +279,7 @@ impl<'a> Transaction<'a> {
     pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
         let hash = self
             .client
-            .send_tx_async(self.signer, &self.receiver_id, self.actions?)
+            .send_tx_async(self.signer, &self.receiver_id, self.actions?, None)
             .await?;
 
         Ok(AsyncTransactionStatus::new(
@@ -312,12 +318,12 @@ impl Transaction<'_> {
         };
 
         if let Ok(actions) = &mut self.actions {
-            actions.push(Action::FunctionCall(FunctionCallAction {
+            actions.push(Action::FunctionCall(Box::new(FunctionCallAction {
                 method_name: function.name.to_string(),
                 args,
                 deposit: function.deposit.as_yoctonear(),
                 gas: function.gas.as_gas(),
-            }));
+            })));
         }
 
         self
@@ -416,6 +422,7 @@ pub struct RetryableTransaction<'a> {
     pub(crate) receiver_id: AccountId,
     pub(crate) actions: Result<Vec<Action>>,
     pub(crate) strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
+    pub(crate) wait_until: Option<TxExecutionStatus>,
 }
 
 impl RetryableTransaction<'_> {
@@ -449,7 +456,12 @@ impl<'a> std::future::IntoFuture for RetryableTransaction<'a> {
             let actions = self.actions?;
             let action = || async {
                 self.client
-                    .send_tx_once(self.signer, &self.receiver_id, actions.clone())
+                    .send_tx_once(
+                        self.signer,
+                        &self.receiver_id,
+                        actions.clone(),
+                        self.wait_until.clone(),
+                    )
                     .await
             };
 
@@ -477,6 +489,7 @@ impl Client {
             receiver_id: contract_id.clone(),
             function: Function::new(function),
             retry_strategy: None,
+            wait_until: None,
         }
     }
 
@@ -519,7 +532,11 @@ impl AsyncTransactionStatus {
     pub async fn status(&self) -> Result<Poll<ExecutionFinalResult>> {
         let result = self
             .client
-            .tx_async_status(&self.sender_id, self.hash)
+            .tx_async_status(
+                &self.sender_id,
+                self.hash,
+                Some(TxExecutionStatus::Executed),
+            )
             .await
             .map(ExecutionFinalResult::from_view);
 
