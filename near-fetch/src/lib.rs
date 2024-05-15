@@ -262,6 +262,41 @@ impl Client {
         let mut nonces = self.access_key_nonces.write().await;
         nonces.remove(cache_key);
     }
+
+    /// Fetches the status of a transaction given the transaction hash.
+    pub(crate) async fn tx_async_status(
+        &self,
+        sender_id: &AccountId,
+        tx_hash: CryptoHash,
+        wait_until: TxExecutionStatus,
+    ) -> Result<FinalExecutionOutcomeView, Error> {
+        let response = self
+            .rpc_client
+            .call(methods::tx::RpcTransactionStatusRequest {
+                transaction_info: methods::tx::TransactionInfo::TransactionId {
+                    sender_account_id: sender_id.clone(),
+                    tx_hash,
+                },
+                wait_until,
+            })
+            .await
+            .map_err(Error::RpcTransactionError)?;
+
+        if matches!(
+            response.final_execution_status,
+            TxExecutionStatus::None | TxExecutionStatus::Included
+        ) {
+            return Err(Error::RpcTransactionPending);
+        }
+
+        let outcome = response
+            .final_execution_outcome
+            .ok_or_else(|| {
+                Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
+            })?
+            .into_outcome();
+        Ok(outcome)
+    }
 }
 
 impl From<Client> for JsonRpcClient {
