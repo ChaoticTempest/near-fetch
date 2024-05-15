@@ -590,10 +590,8 @@ impl Client {
         &self,
         sender_id: &AccountId,
         tx_hash: CryptoHash,
-        wait_until: Option<TxExecutionStatus>,
+        wait_until: TxExecutionStatus,
     ) -> Result<FinalExecutionOutcomeView, Error> {
-        let wait_until = wait_until.unwrap_or_default();
-
         let response = self
             .rpc_client
             .call(methods::tx::RpcTransactionStatusRequest {

@@ -126,7 +126,7 @@ pub struct FunctionCallTransaction<'a> {
     pub(crate) receiver_id: AccountId,
     pub(crate) function: Function,
     pub(crate) retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
-    pub(crate) wait_until: Option<TxExecutionStatus>,
+    pub(crate) wait_until: TxExecutionStatus,
 }
 
 impl FunctionCallTransaction<'_> {
@@ -246,7 +246,7 @@ pub struct Transaction<'a> {
     // Result used to defer errors in argument parsing to later when calling into transact
     actions: Result<Vec<Action>>,
     retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
-    wait_until: Option<TxExecutionStatus>,
+    wait_until: TxExecutionStatus,
 }
 
 impl<'a> Transaction<'a> {
@@ -257,7 +257,7 @@ impl<'a> Transaction<'a> {
             receiver_id,
             actions: Ok(Vec::new()),
             retry_strategy: None,
-            wait_until: None,
+            wait_until: TxExecutionStatus::default(),
         }
     }
 
@@ -422,7 +422,7 @@ pub struct RetryableTransaction<'a> {
     pub(crate) receiver_id: AccountId,
     pub(crate) actions: Result<Vec<Action>>,
     pub(crate) strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
-    pub(crate) wait_until: Option<TxExecutionStatus>,
+    pub(crate) wait_until: TxExecutionStatus,
 }
 
 impl RetryableTransaction<'_> {
@@ -489,7 +489,7 @@ impl Client {
             receiver_id: contract_id.clone(),
             function: Function::new(function),
             retry_strategy: None,
-            wait_until: None,
+            wait_until: TxExecutionStatus::default(),
         }
     }
 
@@ -527,11 +527,7 @@ impl AsyncTransactionStatus {
     pub async fn status(&self) -> Result<Poll<ExecutionFinalResult>> {
         let result = self
             .client
-            .tx_async_status(
-                &self.sender_id,
-                self.hash,
-                Some(TxExecutionStatus::Executed),
-            )
+            .tx_async_status(&self.sender_id, self.hash, TxExecutionStatus::Executed)
             .await
             .map(ExecutionFinalResult::from_view);
 

@@ -84,7 +84,7 @@ impl Client {
         signer: &'a dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
-        wait_until: Option<TxExecutionStatus>,
+        wait_until: TxExecutionStatus,
     ) -> RetryableTransaction<'a> {
         RetryableTransaction {
             client: self.clone(),
@@ -102,11 +102,9 @@ impl Client {
         signer: &dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
-        wait_until: Option<TxExecutionStatus>,
+        wait_until: TxExecutionStatus,
     ) -> Result<FinalExecutionOutcomeView> {
         let cache_key = (signer.account_id().clone(), signer.public_key());
-        let wait_until = wait_until.unwrap_or(TxExecutionStatus::ExecutedOptimistic); // Default equal to legacy broadcast_tx_commit
-
         let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
 
         let result = self
@@ -121,7 +119,7 @@ impl Client {
                     actions: actions.clone(),
                 }
                 .sign(signer.as_signer()),
-                wait_until: wait_until,
+                wait_until,
             })
             .await;
 
