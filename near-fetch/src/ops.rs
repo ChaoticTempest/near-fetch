@@ -496,13 +496,8 @@ impl Client {
     /// Start a batch transaction. Returns a [`Transaction`] object that we can
     /// use to add Actions to the batched transaction. Call `transact` to send
     /// the batched transaction to the network.
-    pub fn batch<'a>(
-        &self,
-        signer: &'a dyn SignerExt,
-        contract_id: &AccountId,
-        function: &str,
-    ) -> Transaction<'a> {
-        Transaction::new(self, signer, contract_id.clone()).call(Function::new(function))
+    pub fn batch<'a>(&self, signer: &'a dyn SignerExt, receiver_id: &AccountId) -> Transaction<'a> {
+        Transaction::new(self, signer, receiver_id.clone())
     }
 }
 
