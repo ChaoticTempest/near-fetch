@@ -604,10 +604,19 @@ impl Client {
             .await
             .map_err(Error::RpcTransactionError)?;
 
-        let outcome = response.final_execution_outcome.ok_or_else(|| {
-            Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
-        })?;
+        if matches!(
+            response.final_execution_status,
+            TxExecutionStatus::None | TxExecutionStatus::Included
+        ) {
+            return Err(Error::RpcTransactionPending);
+        }
 
-        Ok(outcome.into_outcome())
+        let outcome = response
+            .final_execution_outcome
+            .ok_or_else(|| {
+                Error::RpcReturnedInvalidData("Missing final execution outcome".to_string())
+            })?
+            .into_outcome();
+        Ok(outcome)
     }
 }
