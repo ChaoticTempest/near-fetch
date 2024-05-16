@@ -172,7 +172,7 @@ impl FunctionCallTransaction<'_> {
     }
 }
 
-impl<'a> FunctionCallTransaction<'a> {
+impl FunctionCallTransaction<'_> {
     /// Process the transaction, and return the result of the execution.
     pub async fn transact(self) -> Result<ExecutionFinalResult> {
         RetryableTransaction {
@@ -202,7 +202,6 @@ impl<'a> FunctionCallTransaction<'a> {
                 self.signer,
                 &self.receiver_id,
                 vec![self.function.into_action()?.into()],
-                None,
             )
             .await?;
 
@@ -230,6 +229,13 @@ impl<'a> FunctionCallTransaction<'a> {
         strategy: impl Iterator<Item = Duration> + Send + Sync + 'static,
     ) -> Self {
         self.retry_strategy = Some(Box::new(strategy));
+        self
+    }
+
+    /// Specifies the status to wait until the transaction reaches in the network. The default
+    /// value is [`TxExecutionStatus::ExecutedOptimistic`] if not specified by this function.
+    pub fn wait_until(mut self, wait_until: TxExecutionStatus) -> Self {
+        self.wait_until = wait_until;
         self
     }
 }
@@ -279,7 +285,7 @@ impl<'a> Transaction<'a> {
     pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
         let hash = self
             .client
-            .send_tx_async(self.signer, &self.receiver_id, self.actions?, None)
+            .send_tx_async(self.signer, &self.receiver_id, self.actions?)
             .await?;
 
         Ok(AsyncTransactionStatus::new(
@@ -414,6 +420,13 @@ impl Transaction<'_> {
         self.retry_strategy = Some(Box::new(strategy));
         self
     }
+
+    /// Specifies the status to wait until the transaction reaches in the network. The default
+    /// value is [`TxExecutionStatus::ExecutedOptimistic`] if not specified by this function.
+    pub fn wait_until(mut self, wait_until: TxExecutionStatus) -> Self {
+        self.wait_until = wait_until;
+        self
+    }
 }
 
 pub struct RetryableTransaction<'a> {
@@ -443,6 +456,13 @@ impl RetryableTransaction<'_> {
         strategy: impl Iterator<Item = Duration> + Send + Sync + 'static,
     ) -> Self {
         self.strategy = Some(Box::new(strategy));
+        self
+    }
+
+    /// Specifies the status to wait until the transaction reaches in the network. The default
+    /// value is [`TxExecutionStatus::ExecutedOptimistic`] if not specified by this function.
+    pub fn wait_until(mut self, wait_until: TxExecutionStatus) -> Self {
+        self.wait_until = wait_until;
         self
     }
 }

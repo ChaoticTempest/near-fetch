@@ -84,7 +84,6 @@ impl Client {
         signer: &'a dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
-        wait_until: TxExecutionStatus,
     ) -> RetryableTransaction<'a> {
         RetryableTransaction {
             client: self.clone(),
@@ -92,7 +91,7 @@ impl Client {
             actions: Ok(actions),
             receiver_id: receiver_id.clone(),
             strategy: None,
-            wait_until,
+            wait_until: TxExecutionStatus::default(),
         }
     }
 
@@ -140,12 +139,10 @@ impl Client {
         signer: &dyn SignerExt,
         receiver_id: &AccountId,
         actions: Vec<Action>,
-        wait_until: Option<TxExecutionStatus>,
     ) -> Result<CryptoHash> {
         // Note, the cache key's public-key part can be different per retry loop. For instance,
         // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
         let cache_key = (signer.account_id().clone(), signer.public_key());
-        let wait_until = wait_until.unwrap_or(TxExecutionStatus::None); // Default equal to legacy broadcast_tx_async
 
         let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
         let signed_transaction = Transaction {
@@ -163,7 +160,7 @@ impl Client {
             .rpc_client
             .call(&methods::send_tx::RpcSendTransactionRequest {
                 signed_transaction,
-                wait_until,
+                wait_until: TxExecutionStatus::None,
             })
             .await;
 
@@ -330,6 +327,7 @@ async fn fetch_tx_errs(result: &RpcTransactionResponse) -> Vec<&TxExecutionError
     }
     failures
 }
+
 async fn cached_nonce(
     nonce: &AtomicU64,
     client: &Client,
