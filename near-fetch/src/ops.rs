@@ -126,7 +126,7 @@ pub struct FunctionCallTransaction<'a> {
     pub(crate) receiver_id: AccountId,
     pub(crate) function: Function,
     pub(crate) retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
-    pub(crate) wait_until: Option<TxExecutionStatus>,
+    pub(crate) wait_until: TxExecutionStatus,
 }
 
 impl FunctionCallTransaction<'_> {
@@ -172,7 +172,7 @@ impl FunctionCallTransaction<'_> {
     }
 }
 
-impl<'a> FunctionCallTransaction<'a> {
+impl FunctionCallTransaction<'_> {
     /// Process the transaction, and return the result of the execution.
     pub async fn transact(self) -> Result<ExecutionFinalResult> {
         RetryableTransaction {
@@ -202,7 +202,6 @@ impl<'a> FunctionCallTransaction<'a> {
                 self.signer,
                 &self.receiver_id,
                 vec![self.function.into_action()?.into()],
-                None,
             )
             .await?;
 
@@ -232,6 +231,13 @@ impl<'a> FunctionCallTransaction<'a> {
         self.retry_strategy = Some(Box::new(strategy));
         self
     }
+
+    /// Specifies the status to wait until the transaction reaches in the network. The default
+    /// value is [`TxExecutionStatus::ExecutedOptimistic`] if not specified by this function.
+    pub fn wait_until(mut self, wait_until: TxExecutionStatus) -> Self {
+        self.wait_until = wait_until;
+        self
+    }
 }
 
 /// A builder-like object that will allow specifying various actions to be performed
@@ -246,7 +252,7 @@ pub struct Transaction<'a> {
     // Result used to defer errors in argument parsing to later when calling into transact
     actions: Result<Vec<Action>>,
     retry_strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
-    wait_until: Option<TxExecutionStatus>,
+    wait_until: TxExecutionStatus,
 }
 
 impl<'a> Transaction<'a> {
@@ -257,7 +263,7 @@ impl<'a> Transaction<'a> {
             receiver_id,
             actions: Ok(Vec::new()),
             retry_strategy: None,
-            wait_until: None,
+            wait_until: TxExecutionStatus::default(),
         }
     }
 
@@ -279,7 +285,7 @@ impl<'a> Transaction<'a> {
     pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
         let hash = self
             .client
-            .send_tx_async(self.signer, &self.receiver_id, self.actions?, None)
+            .send_tx_async(self.signer, &self.receiver_id, self.actions?)
             .await?;
 
         Ok(AsyncTransactionStatus::new(
@@ -414,6 +420,13 @@ impl Transaction<'_> {
         self.retry_strategy = Some(Box::new(strategy));
         self
     }
+
+    /// Specifies the status to wait until the transaction reaches in the network. The default
+    /// value is [`TxExecutionStatus::ExecutedOptimistic`] if not specified by this function.
+    pub fn wait_until(mut self, wait_until: TxExecutionStatus) -> Self {
+        self.wait_until = wait_until;
+        self
+    }
 }
 
 pub struct RetryableTransaction<'a> {
@@ -422,7 +435,7 @@ pub struct RetryableTransaction<'a> {
     pub(crate) receiver_id: AccountId,
     pub(crate) actions: Result<Vec<Action>>,
     pub(crate) strategy: Option<Box<dyn Iterator<Item = Duration> + Send + Sync>>,
-    pub(crate) wait_until: Option<TxExecutionStatus>,
+    pub(crate) wait_until: TxExecutionStatus,
 }
 
 impl RetryableTransaction<'_> {
@@ -443,6 +456,13 @@ impl RetryableTransaction<'_> {
         strategy: impl Iterator<Item = Duration> + Send + Sync + 'static,
     ) -> Self {
         self.strategy = Some(Box::new(strategy));
+        self
+    }
+
+    /// Specifies the status to wait until the transaction reaches in the network. The default
+    /// value is [`TxExecutionStatus::ExecutedOptimistic`] if not specified by this function.
+    pub fn wait_until(mut self, wait_until: TxExecutionStatus) -> Self {
+        self.wait_until = wait_until;
         self
     }
 }
@@ -489,7 +509,7 @@ impl Client {
             receiver_id: contract_id.clone(),
             function: Function::new(function),
             retry_strategy: None,
-            wait_until: None,
+            wait_until: TxExecutionStatus::default(),
         }
     }
 
@@ -527,11 +547,7 @@ impl AsyncTransactionStatus {
     pub async fn status(&self) -> Result<Poll<ExecutionFinalResult>> {
         let result = self
             .client
-            .tx_async_status(
-                &self.sender_id,
-                self.hash,
-                Some(TxExecutionStatus::Executed),
-            )
+            .tx_async_status(&self.sender_id, self.hash, TxExecutionStatus::Included)
             .await
             .map(ExecutionFinalResult::from_view);
 
@@ -546,6 +562,7 @@ impl AsyncTransactionStatus {
                 Error::RpcTransactionError(JsonRpcError::ServerError(
                     JsonRpcServerError::HandlerError(RpcTransactionError::TimeoutError),
                 )) => Ok(Poll::Pending),
+                Error::RpcTransactionPending => Ok(Poll::Pending),
                 other => Err(other),
             },
         }
@@ -567,6 +584,14 @@ impl AsyncTransactionStatus {
 
             tokio::time::sleep(interval).await;
         }
+    }
+
+    /// Waits until a sepcific transaction status is reached.
+    pub async fn wait_until(self, wait_until: TxExecutionStatus) -> Result<ExecutionFinalResult> {
+        self.client
+            .tx_async_status(&self.sender_id, self.hash, wait_until)
+            .await
+            .map(ExecutionFinalResult::from_view)
     }
 
     /// Get the [`AccountId`] of the account that initiated this transaction.

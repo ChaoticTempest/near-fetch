@@ -21,6 +21,8 @@ pub enum Error {
     RpcTransactionError(#[from] JsonRpcError<RpcTransactionError>),
     #[error(transparent)]
     RpcTransactionAsyncError(#[from] JsonRpcError<RpcBroadcastTxAsyncError>),
+    #[error("transaction has not completed yet")]
+    RpcTransactionPending,
     #[error("invalid data returned: {0}")]
     RpcReturnedInvalidData(String),
     /// Catch all RPC error. This is usually resultant from query calls.
