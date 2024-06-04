@@ -1,2 +1,3 @@
 [workspace]
 members = ["near-fetch", "examples"]
+resolver = "2"
