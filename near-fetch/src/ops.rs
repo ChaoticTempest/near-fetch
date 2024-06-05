@@ -547,7 +547,7 @@ impl AsyncTransactionStatus {
     pub async fn status(&self) -> Result<Poll<ExecutionFinalResult>> {
         let result = self
             .client
-            .tx_async_status(&self.sender_id, self.hash, TxExecutionStatus::Included)
+            .status_tx_async(&self.sender_id, self.hash, TxExecutionStatus::Included)
             .await
             .map(ExecutionFinalResult::from_view);
 
@@ -589,7 +589,7 @@ impl AsyncTransactionStatus {
     /// Waits until a sepcific transaction status is reached.
     pub async fn wait_until(self, wait_until: TxExecutionStatus) -> Result<ExecutionFinalResult> {
         self.client
-            .tx_async_status(&self.sender_id, self.hash, wait_until)
+            .status_tx_async(&self.sender_id, self.hash, wait_until)
             .await
             .map(ExecutionFinalResult::from_view)
     }
