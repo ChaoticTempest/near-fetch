@@ -261,7 +261,7 @@ impl Client {
     }
 
     /// Fetches the status of a transaction given the transaction hash.
-    pub(crate) async fn tx_async_status(
+    pub async fn status_tx_async(
         &self,
         sender_id: &AccountId,
         tx_hash: CryptoHash,
