@@ -9,9 +9,9 @@ anyhow = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 near-account-id = "1.0.0"
-near-crypto = "0.21.2"
+near-crypto = "0.22.0"
 near-fetch = { path = "../near-fetch" }
-near-primitives = "0.21.2"
+near-primitives = "0.22.0"
 
 [[example]]
 name = "various_views"
