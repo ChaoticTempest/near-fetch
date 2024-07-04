@@ -20,12 +20,12 @@ tokio = { version = "1", features = ["full"] }
 tokio-retry = "0.3"
 
 near-account-id = "1"
-near-crypto = { git = "https://github.com/near/nearcore", rev = "08941a3c070eca2e6163a4ad1eaed1f0d3ee233c" }
+near-crypto = "0.23"
 near-gas = { version = "0.2", features = ["serde", "borsh", "schemars"] }
-near-primitives = { git = "https://github.com/near/nearcore", rev = "08941a3c070eca2e6163a4ad1eaed1f0d3ee233c" }
+near-primitives = "0.23"
 near-token = "0.2"
-near-jsonrpc-primitives = { git = "https://github.com/near/nearcore", rev = "08941a3c070eca2e6163a4ad1eaed1f0d3ee233c" }
-near-jsonrpc-client = { git = "https://github.com/near/near-jsonrpc-client-rs", branch = "node/1.40-rc.1", default-features = false }
+near-jsonrpc-primitives = "0.23"
+near-jsonrpc-client = { git = "https://github.com/near/near-jsonrpc-client-rs", branch = "node/1.40", default-features = false }
 
 [features]
 default = ["rustls-tls"]
