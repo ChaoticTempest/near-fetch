@@ -20,12 +20,12 @@ tokio = { version = "1", features = ["full"] }
 tokio-retry = "0.3"
 
 near-account-id = "1"
-near-crypto = "0.22"
+near-crypto = "0.23"
 near-gas = { version = "0.2", features = ["serde", "borsh", "schemars"] }
-near-primitives = "0.22"
+near-primitives = "0.23"
 near-token = "0.2"
-near-jsonrpc-primitives = "0.22"
-near-jsonrpc-client = { version = "0.10", default-features = false }
+near-jsonrpc-primitives = "0.23"
+near-jsonrpc-client = { version = "0.10.1", default-features = false }
 
 [features]
 default = ["rustls-tls"]
