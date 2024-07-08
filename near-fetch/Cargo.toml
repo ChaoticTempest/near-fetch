@@ -25,7 +25,7 @@ near-gas = { version = "0.2", features = ["serde", "borsh", "schemars"] }
 near-primitives = "0.23"
 near-token = "0.2"
 near-jsonrpc-primitives = "0.23"
-near-jsonrpc-client = { git = "https://github.com/near/near-jsonrpc-client-rs", branch = "node/1.40", default-features = false }
+near-jsonrpc-client = { version = "0.10.1", default-features = false }
 
 [features]
 default = ["rustls-tls"]
