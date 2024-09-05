@@ -132,7 +132,8 @@ impl ExecutionFinalResult {
                 details: self.details,
             }),
             FinalExecutionStatus::Failure(tx_error) => Err(Error::TxExecution(Box::new(tx_error))),
-            _ => unreachable!(),
+            FinalExecutionStatus::NotStarted => Err(Error::TxStatus("NotStarted")),
+            FinalExecutionStatus::Started => Err(Error::TxStatus("Started")),
         }
     }
 
