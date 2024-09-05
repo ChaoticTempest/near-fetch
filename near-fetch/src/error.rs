@@ -30,6 +30,8 @@ pub enum Error {
     Rpc(Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]
     TxExecution(Box<TxExecutionError>),
+    #[error("tx_status={0}")]
+    TxStatus(&'static str),
 
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
