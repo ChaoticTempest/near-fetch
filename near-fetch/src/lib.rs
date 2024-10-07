@@ -15,7 +15,7 @@ use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::errors::{ActionError, ActionErrorKind, InvalidTxError, TxExecutionError};
 use near_primitives::hash::CryptoHash;
-use near_primitives::transaction::{Action, Transaction};
+use near_primitives::transaction::{Action, SignedTransaction, Transaction};
 use near_primitives::types::{BlockHeight, Finality, Nonce};
 use near_primitives::views::{
     AccessKeyView, ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionOutcomeViewEnum,
@@ -95,6 +95,28 @@ impl Client {
         }
     }
 
+    pub(crate) async fn sign_tx(
+        &self,
+        signer: &dyn SignerExt,
+        receiver_id: &AccountId,
+        actions: Vec<Action>,
+    ) -> Result<SignedTransaction> {
+        let pk = signer.public_key();
+        let (nonce, block_hash, _) = self.fetch_nonce(signer.account_id(), &pk).await?;
+
+        let tx = Transaction::V0(near_primitives::transaction::TransactionV0 {
+            nonce,
+            signer_id: signer.account_id().clone(),
+            public_key: pk,
+            receiver_id: receiver_id.clone(),
+            block_hash,
+            actions,
+        });
+
+        let signature = signer.sign(tx.get_hash_and_size().0.as_ref());
+        Ok(SignedTransaction::new(signature, tx))
+    }
+
     /// Send the transaction only once. No retrying involved.
     pub(crate) async fn send_tx_once(
         &self,
@@ -104,20 +126,12 @@ impl Client {
         wait_until: TxExecutionStatus,
     ) -> Result<FinalExecutionOutcomeView> {
         let cache_key = (signer.account_id().clone(), signer.public_key());
-        let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
+        let signed_transaction = self.sign_tx(signer, receiver_id, actions).await?;
 
         let result = self
             .rpc_client
             .call(&methods::send_tx::RpcSendTransactionRequest {
-                signed_transaction: Transaction {
-                    nonce,
-                    block_hash,
-                    signer_id: signer.account_id().clone(),
-                    public_key: signer.public_key(),
-                    receiver_id: receiver_id.clone(),
-                    actions: actions.clone(),
-                }
-                .sign(signer.as_signer()),
+                signed_transaction,
                 wait_until,
             })
             .await;
@@ -143,17 +157,7 @@ impl Client {
         // Note, the cache key's public-key part can be different per retry loop. For instance,
         // KeyRotatingSigner rotates secret_key and public_key after each `Signer::sign` call.
         let cache_key = (signer.account_id().clone(), signer.public_key());
-
-        let (nonce, block_hash, _) = self.fetch_nonce(&cache_key.0, &cache_key.1).await?;
-        let signed_transaction = Transaction {
-            nonce,
-            block_hash,
-            signer_id: signer.account_id().clone(),
-            public_key: signer.public_key(),
-            receiver_id: receiver_id.clone(),
-            actions: actions.clone(),
-        }
-        .sign(signer.as_signer());
+        let signed_transaction = self.sign_tx(signer, receiver_id, actions).await?;
         let tx_hash = signed_transaction.get_hash();
 
         let result = self

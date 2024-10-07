@@ -55,18 +55,12 @@ impl KeyRotatingSigner {
     pub fn public_key(&self) -> &PublicKey {
         &self.current_signer().public_key
     }
-}
 
-impl Signer for KeyRotatingSigner {
-    fn sign(&self, data: &[u8]) -> Signature {
+    pub fn sign(&self, data: &[u8]) -> Signature {
         self.fetch_and_rotate_signer().sign(data)
     }
 
-    fn public_key(&self) -> PublicKey {
-        self.current_signer().public_key()
-    }
-
-    fn compute_vrf_with_proof(&self, data: &[u8]) -> (vrf::Value, vrf::Proof) {
+    pub fn compute_vrf_with_proof(&self, data: &[u8]) -> (vrf::Value, vrf::Proof) {
         self.current_signer().compute_vrf_with_proof(data)
     }
 }
@@ -82,6 +76,15 @@ impl ExposeAccountId for InMemorySigner {
     }
 }
 
+impl ExposeAccountId for Signer {
+    fn account_id(&self) -> &AccountId {
+        match self {
+            Signer::InMemory(signer) => signer.account_id(),
+            Signer::Empty(_) => unimplemented!(),
+        }
+    }
+}
+
 impl ExposeAccountId for KeyRotatingSigner {
     fn account_id(&self) -> &AccountId {
         self.current_signer().account_id()
@@ -89,14 +92,43 @@ impl ExposeAccountId for KeyRotatingSigner {
 }
 
 /// A trait for extending the [`Signer`] trait with additional functionality.
-pub trait SignerExt: Signer + ExposeAccountId {
-    fn as_signer(&self) -> &dyn Signer;
+pub trait SignerExt: ExposeAccountId + Send + Sync {
+    fn sign(&self, data: &[u8]) -> Signature;
+    fn public_key(&self) -> PublicKey;
 }
-impl<T> SignerExt for T
-where
-    T: Signer + ExposeAccountId,
-{
-    fn as_signer(&self) -> &dyn Signer {
-        self
+
+impl SignerExt for InMemorySigner {
+    fn sign(&self, data: &[u8]) -> Signature {
+        InMemorySigner::sign(self, data)
+    }
+
+    fn public_key(&self) -> PublicKey {
+        InMemorySigner::public_key(self).clone()
+    }
+}
+
+impl SignerExt for Signer {
+    fn sign(&self, data: &[u8]) -> Signature {
+        match self {
+            Signer::InMemory(signer) => signer.sign(data),
+            Signer::Empty(_) => unimplemented!(),
+        }
+    }
+
+    fn public_key(&self) -> PublicKey {
+        match self {
+            Signer::InMemory(signer) => signer.public_key.clone(),
+            Signer::Empty(_) => unimplemented!(),
+        }
+    }
+}
+
+impl SignerExt for KeyRotatingSigner {
+    fn sign(&self, data: &[u8]) -> Signature {
+        KeyRotatingSigner::sign(self, data)
+    }
+
+    fn public_key(&self) -> PublicKey {
+        KeyRotatingSigner::public_key(self).clone()
     }
 }
