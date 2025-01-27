@@ -1,6 +1,6 @@
 [package]
 name = "near-fetch"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 readme = "../README.md"
@@ -20,11 +20,11 @@ tokio = { version = "1", features = ["full"] }
 tokio-retry = "0.3"
 
 near-account-id = "1"
-near-crypto = "0.28.0"
+near-crypto = "0.28"
 near-gas = { version = "0.3", features = ["serde", "borsh", "schemars"] }
-near-primitives = "0.28.0"
+near-primitives = "0.28"
 near-token = "0.3"
-near-jsonrpc-primitives = "0.28.0"
+near-jsonrpc-primitives = "0.28"
 near-jsonrpc-client = { version = "0.15.1", default-features = false }
 
 [features]
