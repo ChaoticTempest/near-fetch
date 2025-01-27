@@ -438,7 +438,7 @@ impl<'a> std::future::IntoFuture for QueryChunk<'a> {
                 let block_view = self.client.view_block().await?;
                 ChunkReference::BlockShardId {
                     block_id: BlockId::Hash(block_view.header.hash),
-                    shard_id: 0,
+                    shard_id: ShardId::from(0),
                 }
             };
 
