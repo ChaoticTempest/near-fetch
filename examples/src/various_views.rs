@@ -1,3 +1,5 @@
+use near_primitives::types::ShardId;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let client = near_fetch::Client::new("https://rpc.testnet.near.org");
@@ -7,7 +9,7 @@ async fn main() -> anyhow::Result<()> {
     println!("lastest block: {block:#?}");
 
     // Reference the chunk via the block hash we queried for earlier:
-    let shard_id = 0;
+    let shard_id = ShardId::from(0);
     let chunk = client
         .view_chunk()
         .block_hash_and_shard(block.header.hash, shard_id)
