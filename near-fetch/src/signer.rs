@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 /// each call to [`Signer::sign`].
 #[derive(Clone)]
 pub struct KeyRotatingSigner {
-    signers: Arc<Vec<InMemorySigner>>,
+    signers: Arc<Vec<Signer>>,
     counter: Arc<AtomicUsize>,
 }
 
@@ -32,7 +32,7 @@ impl KeyRotatingSigner {
         )))
     }
 
-    pub fn from_signers(iterable: impl IntoIterator<Item = InMemorySigner>) -> Self {
+    pub fn from_signers(iterable: impl IntoIterator<Item = Signer>) -> Self {
         Self {
             signers: Arc::new(iterable.into_iter().collect()),
             counter: Arc::new(AtomicUsize::new(0)),
@@ -40,20 +40,20 @@ impl KeyRotatingSigner {
     }
 
     /// Fetches the current signer in the key rotation.
-    pub fn current_signer(&self) -> &InMemorySigner {
+    pub fn current_signer(&self) -> &Signer {
         &self.signers[self.counter.load(Ordering::SeqCst) % self.signers.len()]
     }
 
     // TODO: implement key rotation strategy injection?
     /// Fetches the current signer and rotates to the next one.
-    pub fn fetch_and_rotate_signer(&self) -> &InMemorySigner {
+    pub fn fetch_and_rotate_signer(&self) -> &Signer {
         // note: overflow will just wrap on atomics:
         let idx = self.counter.fetch_add(1, Ordering::SeqCst);
         &self.signers[idx % self.signers.len()]
     }
 
-    pub fn public_key(&self) -> &PublicKey {
-        &self.current_signer().public_key
+    pub fn public_key(&self) -> PublicKey {
+        self.current_signer().public_key()
     }
 
     pub fn sign(&self, data: &[u8]) -> Signature {
@@ -129,6 +129,6 @@ impl SignerExt for KeyRotatingSigner {
     }
 
     fn public_key(&self) -> PublicKey {
-        KeyRotatingSigner::public_key(self).clone()
+        KeyRotatingSigner::public_key(self)
     }
 }
