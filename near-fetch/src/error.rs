@@ -12,15 +12,15 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[non_exhaustive]
 pub enum Error {
     #[error(transparent)]
-    RpcBlockError(#[from] JsonRpcError<RpcBlockError>),
+    RpcBlockError(Box<JsonRpcError<RpcBlockError>>),
     #[error(transparent)]
-    RpcQueryError(#[from] JsonRpcError<RpcQueryError>),
+    RpcQueryError(Box<JsonRpcError<RpcQueryError>>),
     #[error(transparent)]
-    RpcChunkError(#[from] JsonRpcError<RpcChunkError>),
+    RpcChunkError(Box<JsonRpcError<RpcChunkError>>),
     #[error(transparent)]
-    RpcTransactionError(#[from] JsonRpcError<RpcTransactionError>),
+    RpcTransactionError(Box<JsonRpcError<RpcTransactionError>>),
     #[error(transparent)]
-    RpcTransactionAsyncError(#[from] JsonRpcError<RpcBroadcastTxAsyncError>),
+    RpcTransactionAsyncError(Box<JsonRpcError<RpcBroadcastTxAsyncError>>),
     #[error("transaction has not completed yet")]
     RpcTransactionPending,
     #[error("invalid data returned: {0}")]
@@ -41,4 +41,34 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("invalid args were passed: {0}")]
     InvalidArgs(&'static str),
+}
+
+impl From<JsonRpcError<RpcBlockError>> for Error {
+    fn from(err: JsonRpcError<RpcBlockError>) -> Self {
+        Error::RpcBlockError(Box::new(err))
+    }
+}
+
+impl From<JsonRpcError<RpcQueryError>> for Error {
+    fn from(err: JsonRpcError<RpcQueryError>) -> Self {
+        Error::RpcQueryError(Box::new(err))
+    }
+}
+
+impl From<JsonRpcError<RpcChunkError>> for Error {
+    fn from(err: JsonRpcError<RpcChunkError>) -> Self {
+        Error::RpcChunkError(Box::new(err))
+    }
+}
+
+impl From<JsonRpcError<RpcTransactionError>> for Error {
+    fn from(err: JsonRpcError<RpcTransactionError>) -> Self {
+        Error::RpcTransactionError(Box::new(err))
+    }
+}
+
+impl From<JsonRpcError<RpcBroadcastTxAsyncError>> for Error {
+    fn from(err: JsonRpcError<RpcBroadcastTxAsyncError>) -> Self {
+        Error::RpcTransactionAsyncError(Box::new(err))
+    }
 }

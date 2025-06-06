@@ -281,7 +281,7 @@ impl Client {
                 wait_until,
             })
             .await
-            .map_err(Error::RpcTransactionError)?;
+            .map_err(Error::from)?;
 
         if matches!(
             response.final_execution_status,

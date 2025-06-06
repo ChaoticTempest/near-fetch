@@ -554,14 +554,16 @@ impl AsyncTransactionStatus {
         match result {
             Ok(result) => Ok(Poll::Ready(result)),
             Err(err) => match err {
-                Error::RpcTransactionError(JsonRpcError::ServerError(
-                    JsonRpcServerError::HandlerError(RpcTransactionError::UnknownTransaction {
-                        ..
-                    }),
-                )) => Ok(Poll::Pending),
-                Error::RpcTransactionError(JsonRpcError::ServerError(
-                    JsonRpcServerError::HandlerError(RpcTransactionError::TimeoutError),
-                )) => Ok(Poll::Pending),
+                Error::RpcTransactionError(err) => match &*err {
+                    JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+                        RpcTransactionError::UnknownTransaction { .. },
+                    )) => Ok(Poll::Pending),
+
+                    JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+                        RpcTransactionError::TimeoutError,
+                    )) => Ok(Poll::Pending),
+                    _ => Err(Error::RpcTransactionError(err)),
+                },
                 Error::RpcTransactionPending => Ok(Poll::Pending),
                 other => Err(other),
             },
