@@ -1,7 +1,7 @@
 //! Result and execution types from results of RPC calls to the network.
 
-use near_gas::NearGas;
 use near_primitives::borsh;
+use near_primitives::types::Gas;
 use near_primitives::views::{
     ExecutionOutcomeWithIdView, ExecutionStatusView, FinalExecutionOutcomeView,
     FinalExecutionStatus, SignedTransactionView,
@@ -89,7 +89,7 @@ impl ExecutionDetails {
 #[non_exhaustive]
 pub struct ExecutionResult<T> {
     /// Total gas burnt by the execution
-    pub total_gas_burnt: NearGas,
+    pub total_gas_burnt: Gas,
 
     /// Value returned from an execution. This is a base64 encoded str for a successful
     /// execution or a `TxExecutionError` if a failed one.
@@ -137,16 +137,15 @@ impl ExecutionFinalResult {
         }
     }
 
-    pub fn total_gas_burnt(&self) -> NearGas {
-        NearGas::from_gas(
-            self.details.transaction_outcome.outcome.gas_burnt
-                + self
-                    .details
-                    .receipts_outcome
-                    .iter()
-                    .map(|t| t.outcome.gas_burnt)
-                    .sum::<u64>(),
-        )
+    pub fn total_gas_burnt(&self) -> Gas {
+        let tx_gas = self.details.transaction_outcome.outcome.gas_burnt.as_gas();
+        let receipts_gas: u64 = self
+            .details
+            .receipts_outcome
+            .iter()
+            .map(|t| t.outcome.gas_burnt.as_gas())
+            .sum();
+        Gas::from_gas(tx_gas + receipts_gas)
     }
 
     /// Returns the contained Ok value, consuming the self value.

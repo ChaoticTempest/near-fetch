@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
-use near_gas::NearGas;
 use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::account::AccessKey;
@@ -16,6 +15,7 @@ use near_primitives::transaction::{
     Action, AddKeyAction, CreateAccountAction, DeleteAccountAction, DeleteKeyAction,
     DeployContractAction, FunctionCallAction, StakeAction, TransferAction,
 };
+use near_primitives::types::Gas;
 use near_primitives::views::{FinalExecutionOutcomeView, TxExecutionStatus};
 use near_token::NearToken;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
@@ -27,11 +27,11 @@ use crate::signer::SignerExt;
 use crate::{Client, Error, Result};
 
 /// Maximum amount of gas that can be used in a single transaction.
-pub const MAX_GAS: NearGas = NearGas::from_tgas(300);
+pub const MAX_GAS: Gas = Gas::from_teragas(300);
 
 /// Default amount of gas to be used when calling into a function on a contract.
 /// This is set to 10 TGas as a default for convenience.
-pub const DEFAULT_CALL_FN_GAS: NearGas = NearGas::from_tgas(10);
+pub const DEFAULT_CALL_FN_GAS: Gas = Gas::from_teragas(10);
 
 /// Default amount of deposit to be used when calling into a function on a contract.
 /// This is set to 0 NEAR as a default for convenience. Note, that some contracts
@@ -45,7 +45,7 @@ pub struct Function {
     pub(crate) name: String,
     pub(crate) args: Result<Vec<u8>>,
     pub(crate) deposit: NearToken,
-    pub(crate) gas: NearGas,
+    pub(crate) gas: Gas,
 }
 
 impl Function {
@@ -100,7 +100,7 @@ impl Function {
     }
 
     /// Specify the amount of gas to be used.
-    pub fn gas(mut self, gas: NearGas) -> Self {
+    pub fn gas(mut self, gas: Gas) -> Self {
         self.gas = gas;
         self
     }
@@ -114,8 +114,8 @@ impl Function {
         Ok(FunctionCallAction {
             args: self.args?,
             method_name: self.name,
-            gas: self.gas.as_gas(),
-            deposit: self.deposit.as_yoctonear(),
+            gas: self.gas,
+            deposit: self.deposit,
         })
     }
 }
@@ -161,7 +161,7 @@ impl FunctionCallTransaction<'_> {
     }
 
     /// Specify the amount of gas to be used.
-    pub fn gas(mut self, gas: NearGas) -> Self {
+    pub fn gas(mut self, gas: Gas) -> Self {
         self.function = self.function.gas(gas);
         self
     }
@@ -327,8 +327,8 @@ impl Transaction<'_> {
             actions.push(Action::FunctionCall(Box::new(FunctionCallAction {
                 method_name: function.name.to_string(),
                 args,
-                deposit: function.deposit.as_yoctonear(),
-                gas: function.gas.as_gas(),
+                deposit: function.deposit,
+                gas: function.gas,
             })));
         }
 
@@ -379,7 +379,7 @@ impl Transaction<'_> {
         if let Ok(actions) = &mut self.actions {
             actions.push(
                 StakeAction {
-                    stake: stake.as_yoctonear(),
+                    stake,
                     public_key: pk,
                 }
                 .into(),
@@ -391,12 +391,7 @@ impl Transaction<'_> {
     /// Transfer `deposit` amount from `signer`'s account into `receiver_id`'s account.
     pub fn transfer(mut self, deposit: NearToken) -> Self {
         if let Ok(actions) = &mut self.actions {
-            actions.push(
-                TransferAction {
-                    deposit: deposit.as_yoctonear(),
-                }
-                .into(),
-            );
+            actions.push(TransferAction { deposit }.into());
         }
         self
     }

@@ -19,13 +19,13 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-retry = "0.3"
 
-near-account-id = "1"
-near-crypto = "0.31"
+near-account-id = "2"
+near-crypto = "0.35"
 near-gas = { version = "0.3", features = ["serde", "borsh", "schemars"] }
-near-primitives = "0.31"
+near-primitives = "0.35"
 near-token = "0.3"
-near-jsonrpc-primitives = "0.31"
-near-jsonrpc-client = { version = "0.18", default-features = false }
+near-jsonrpc-primitives = "0.35"
+near-jsonrpc-client = { version = "0.21", default-features = false }
 
 [features]
 default = ["rustls-tls"]
