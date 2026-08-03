@@ -63,10 +63,17 @@ impl<'a, T> Query<'a, T> {
     }
 }
 
-// Constrained to RpcQueryRequest, since methods like GasPrice only take block_id but not Finality.
+/// Marker trait for RPC methods that accept a [`Finality`] as their block reference,
+/// such as query and block requests. Methods like gas price only take a block id.
+pub trait SupportsFinality: methods::RpcMethod {}
+
+impl SupportsFinality for methods::query::RpcQueryRequest {}
+impl SupportsFinality for methods::block::RpcBlockRequest {}
+
 impl<'a, T> Query<'a, T>
 where
-    T: ProcessQuery<Method = methods::query::RpcQueryRequest>,
+    T: ProcessQuery,
+    T::Method: SupportsFinality,
 {
     /// Specify at which block [`Finality`] to query from.
     pub fn finality(mut self, value: Finality) -> Self {

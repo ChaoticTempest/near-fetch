@@ -279,8 +279,9 @@ impl Client {
         let resp = self
             .call_with_retry(
                 &RpcQueryRequest {
-                    // Finality::None => Optimistic query for access key
-                    block_reference: Finality::None.into(),
+                    // Finality::Final is used to avoid transaction expiration when the RPC
+                    // nodes are at different chain heights, e.g. on load-balanced endpoints.
+                    block_reference: Finality::Final.into(),
                     request: QueryRequest::ViewAccessKey {
                         account_id: account_id.clone(),
                         public_key: public_key.clone(),
@@ -456,8 +457,9 @@ async fn cached_nonce(
 ) -> Result<(Nonce, CryptoHash, BlockHeight)> {
     let nonce = nonce.fetch_add(1, Ordering::SeqCst);
 
-    // Fetch latest block_hash since the previous one is now invalid for new transactions:
-    let block = client.view_block().await?;
+    // Fetch the latest finalized block_hash since the previous one is now invalid
+    // for new transactions, and to avoid expiration on load-balanced RPC endpoints.
+    let block = client.view_block().finality(Finality::Final).await?;
     Ok((nonce + 1, block.header.hash, block.header.height))
 }
 
