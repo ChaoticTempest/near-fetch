@@ -48,6 +48,23 @@ pub struct Function {
     pub(crate) gas: Gas,
 }
 
+impl Clone for Function {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            // `Error` is not cloneable, so a deferred args error is re-created
+            // with its message preserved.
+            args: self
+                .args
+                .as_ref()
+                .cloned()
+                .map_err(|err| Error::RpcReturnedInvalidData(err.to_string())),
+            deposit: self.deposit,
+            gas: self.gas,
+        }
+    }
+}
+
 impl Function {
     /// Initialize a new instance of [`Function`], tied to a specific function on a
     /// contract that lives directly on a contract we've specified in [`Transaction`].
