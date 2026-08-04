@@ -72,12 +72,9 @@ where
     ///
     /// ## Example
     /// ```rust,no_run
-    /// # use near_account_id::AccountId;
     /// # use near_fetch::Client;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = Client::new("https://rpc.testnet.near.org");
-    /// # let contract: AccountId = "social.near".parse()?;
-    /// let gas_price = client.gas_price().await?;
     /// let price_in_near = client.gas_price().map(|p| p.to_string()).await?;
     /// # Ok(())
     /// # }
@@ -708,5 +705,28 @@ impl Client {
     /// Fetches the latest gas price on the network.
     pub fn gas_price(&self) -> Query<'_, GasPrice> {
         Query::new(self, GasPrice)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_result_json() {
+        let result = ViewResult {
+            result: serde_json::to_vec(&42u32).unwrap(),
+            logs: vec![],
+        };
+        assert_eq!(result.json::<u32>().unwrap(), 42);
+    }
+
+    #[test]
+    fn view_result_borsh() {
+        let result = ViewResult {
+            result: borsh::to_vec(&42u32).unwrap(),
+            logs: vec![],
+        };
+        assert_eq!(result.borsh::<u32>().unwrap(), 42);
     }
 }

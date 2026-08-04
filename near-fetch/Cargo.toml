@@ -37,3 +37,4 @@ rustls-tls = ["near-jsonrpc-client/rustls-tls"]
 
 [dev-dependencies]
 mockito = { version = "1.7", default-features = false }
+reqwest = "0.12"

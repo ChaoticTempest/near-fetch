@@ -207,3 +207,61 @@ impl SignerExt for KeyRotatingSigner {
         KeyRotatingSigner::public_key(self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex_to_hash(hex: &str) -> CryptoHash {
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        CryptoHash(bytes.try_into().unwrap())
+    }
+
+    #[test]
+    fn compute_hash_matches_nep413_spec_example() {
+        // Worked example from the NEP-413 spec, cross-checked against near-api-js:
+        // message "hi", nonce [0..=31], recipient "myapp.com", callback "myapp.com/callback".
+        let payload = OffchainMessage {
+            message: "hi".into(),
+            nonce: std::array::from_fn(|i| i as u8),
+            recipient: "myapp.com".into(),
+            callback_url: Some("myapp.com/callback".into()),
+        };
+
+        let hash = payload.compute_hash().unwrap();
+        let expected =
+            hex_to_hash("c9ce5de288f7de6d83e2303e56c7615949da83867ea33c0747ed45c47ef50148");
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn compute_hash_without_callback_url() {
+        let payload = OffchainMessage {
+            message: "hi".into(),
+            nonce: [0u8; 32],
+            recipient: "myapp.com".into(),
+            callback_url: None,
+        };
+        let hash = payload.compute_hash().unwrap();
+        let expected =
+            hex_to_hash("58909135e0c2d203cce3f7f0ff53d44ee2851fffe37c9d1f569ebcc83f2d5c4c");
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn extracts_timestamp_from_nonce() {
+        let mut nonce = [0u8; 32];
+        nonce[..8].copy_from_slice(&1_700_000_000_000u64.to_be_bytes());
+
+        let payload = OffchainMessage {
+            message: "hi".into(),
+            nonce,
+            recipient: "myapp.com".into(),
+            callback_url: None,
+        };
+        assert_eq!(payload.extract_timestamp_from_nonce(), 1_700_000_000_000);
+    }
+}

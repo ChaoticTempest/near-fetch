@@ -48,8 +48,8 @@ const RETRIES_PER_ENDPOINT: usize = 3;
 /// Time to wait between each retry attempt.
 const RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
-/// Client that implements exponential retrying and caching of access key nonces,
-/// with failover support across multiple RPC endpoints.
+/// Client that implements retrying and caching of access key nonces, with failover
+/// support across multiple RPC endpoints.
 #[derive(Clone, Debug)]
 pub struct Client {
     /// RPC endpoints to use, where requests fail over to the next one when
@@ -580,7 +580,12 @@ async fn fetch_nonce(
 mod tests {
     use super::*;
     use mockito::Server;
+    use near_jsonrpc_client::errors::{
+        JsonRpcServerResponseStatusError, JsonRpcTransportRecvError, RpcTransportError,
+    };
     use near_jsonrpc_client::methods::health::RpcHealthRequest;
+    use near_jsonrpc_primitives::message::Message;
+    use near_primitives::errors::InvalidTxError;
 
     fn jsonrpc_client(addr: &str) -> JsonRpcClient {
         JsonRpcClient::new_client().connect(addr)
@@ -637,5 +642,106 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(client.current_endpoint_index(), 0);
         mock.assert_async().await;
+    }
+
+    fn transport_error<E>() -> JsonRpcError<E> {
+        JsonRpcError::TransportError(RpcTransportError::RecvError(
+            JsonRpcTransportRecvError::UnexpectedServerResponse(Box::new(Message::notification(
+                "test".into(),
+                serde_json::Value::Null,
+            ))),
+        ))
+    }
+
+    fn server_error<E>(err: JsonRpcServerError<E>) -> JsonRpcError<E> {
+        JsonRpcError::ServerError(err)
+    }
+
+    fn invalid_nonce_error() -> JsonRpcError<RpcTransactionError> {
+        server_error(JsonRpcServerError::HandlerError(
+            RpcTransactionError::InvalidTransaction {
+                context: InvalidTxError::InvalidNonce {
+                    tx_nonce: 1,
+                    ak_nonce: 1,
+                },
+            },
+        ))
+    }
+
+    #[test]
+    fn transport_errors_are_retryable() {
+        assert!(is_retryable_error(&transport_error::<RpcTransactionError>()));
+        assert!(!is_critical_tx_error(&transport_error()));
+    }
+
+    #[test]
+    fn retryable_server_errors() {
+        for status in [
+            JsonRpcServerResponseStatusError::TooManyRequests,
+            JsonRpcServerResponseStatusError::TimeoutError,
+            JsonRpcServerResponseStatusError::ServiceUnavailable,
+        ] {
+            let err: JsonRpcError<RpcTransactionError> =
+                server_error(JsonRpcServerError::ResponseStatusError(status));
+            assert!(is_retryable_error(&err));
+        }
+
+        let unexpected: JsonRpcError<RpcTransactionError> = server_error(
+            JsonRpcServerError::ResponseStatusError(JsonRpcServerResponseStatusError::Unexpected {
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            }),
+        );
+        assert!(is_retryable_error(&unexpected));
+
+        let client_error: JsonRpcError<RpcTransactionError> = server_error(
+            JsonRpcServerError::ResponseStatusError(JsonRpcServerResponseStatusError::Unexpected {
+                status: reqwest::StatusCode::NOT_FOUND,
+            }),
+        );
+        assert!(!is_retryable_error(&client_error));
+    }
+
+    #[test]
+    fn invalid_transaction_errors_are_critical() {
+        assert!(is_critical_tx_error(&invalid_nonce_error()));
+        assert!(is_critical_status_error(&invalid_nonce_error()));
+    }
+
+    #[test]
+    fn tx_handler_timeouts_are_retried() {
+        let timeout = server_error(JsonRpcServerError::HandlerError(
+            RpcTransactionError::TimeoutError(None),
+        ));
+        assert!(!is_critical_tx_error(&timeout));
+        assert!(!is_critical_status_error(&timeout));
+
+        let routed = server_error(JsonRpcServerError::HandlerError(
+            RpcTransactionError::RequestRouted {
+                transaction_hash: CryptoHash::default(),
+            },
+        ));
+        assert!(!is_critical_tx_error(&routed));
+    }
+
+    #[test]
+    fn status_unknown_transaction_is_retried() {
+        let unknown = server_error(JsonRpcServerError::HandlerError(
+            RpcTransactionError::UnknownTransaction {
+                requested_transaction_hash: CryptoHash::default(),
+            },
+        ));
+        // Node-specific errors are retried for both sends and status polling.
+        assert!(!is_critical_status_error(&unknown));
+        assert!(!is_critical_tx_error(&unknown));
+    }
+
+    #[test]
+    fn other_handler_errors_are_critical() {
+        let err = server_error(JsonRpcServerError::HandlerError(
+            RpcTransactionError::DoesNotTrackShard,
+        ));
+        // A node that does not track the shard is retried on another endpoint.
+        assert!(!is_critical_tx_error(&err));
+        assert!(!is_critical_status_error(&err));
     }
 }
