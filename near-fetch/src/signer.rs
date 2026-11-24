@@ -10,9 +10,9 @@ use near_primitives::views::AccessKeyPermissionView;
 use crate::error::{Error, Result};
 use crate::Client;
 
-/// [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md) input for
-/// signing an off-chain message, widely used for authentication and proof of account
-/// ownership.
+/// An off-chain message to sign, as defined by
+/// [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md). Widely used for
+/// authentication and proof of account ownership.
 #[derive(
     Debug,
     Clone,
@@ -21,7 +21,7 @@ use crate::Client;
     borsh::BorshSerialize,
     borsh::BorshDeserialize,
 )]
-pub struct NEP413Payload {
+pub struct OffchainMessage {
     /// The message that is being transmitted.
     pub message: String,
     /// A nonce that uniquely identifies this instance of the message, denoted as a 32 bytes array.
@@ -32,10 +32,10 @@ pub struct NEP413Payload {
     pub callback_url: Option<String>,
 }
 
-impl NEP413Payload {
+impl OffchainMessage {
     const MESSAGE_PREFIX: u32 = (1u32 << 31) + 413;
 
-    /// Compute the NEP-413 hash for this payload.
+    /// Compute the NEP-413 hash for this message.
     pub fn compute_hash(&self) -> Result<CryptoHash> {
         let mut bytes = Self::MESSAGE_PREFIX.to_le_bytes().to_vec();
         borsh::to_writer(&mut bytes, self)?;
@@ -49,7 +49,7 @@ impl NEP413Payload {
         u64::from_be_bytes(timestamp)
     }
 
-    /// Verify a signature over this payload, and that the public key belongs to the
+    /// Verify a signature over this message, and that the public key belongs to the
     /// account as a full access key, as required by NEP-413.
     pub async fn verify(
         &self,
@@ -158,13 +158,13 @@ pub trait SignerExt: ExposeAccountId + Send + Sync {
     fn sign(&self, data: &[u8]) -> Signature;
     fn public_key(&self) -> PublicKey;
 
-    /// Signs a [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md) message,
-    /// widely used for authentication and off-chain proof of account ownership. This is
-    /// the same as signing the payload's hash, and so is infallible.
-    fn sign_message_nep413(&self, payload: &NEP413Payload) -> Signature {
-        let hash = payload
+    /// Signs an [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md) off-chain
+    /// message, widely used for authentication and proof of account ownership. This is
+    /// the same as signing the message's hash, and so is infallible.
+    fn sign_offchain(&self, message: &OffchainMessage) -> Signature {
+        let hash = message
             .compute_hash()
-            .expect("NEP-413 payload serialization is infallible");
+            .expect("NEP-413 message serialization is infallible");
         self.sign(hash.as_ref())
     }
 }
