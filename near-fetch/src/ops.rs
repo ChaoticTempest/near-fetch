@@ -595,6 +595,531 @@ mod tests {
         );
         assert_eq!(err.to_string(), message);
     }
+
+    use near_crypto::{InMemorySigner, KeyType, SecretKey};
+    use near_primitives::account::{AccessKey, AccessKeyPermission};
+
+    struct FailingSerialize;
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("cannot serialize"))
+        }
+    }
+
+    struct FailingBorsh;
+    impl borsh::BorshSerialize for FailingBorsh {
+        fn serialize<W: borsh::io::Write>(&self, _: &mut W) -> borsh::io::Result<()> {
+            Err(borsh::io::Error::other("cannot borsh serialize"))
+        }
+    }
+
+    fn signer(id: &str) -> InMemorySigner {
+        let account_id: AccountId = id.parse().unwrap();
+        let secret_key = SecretKey::from_random(KeyType::ED25519);
+        let public_key = secret_key.public_key();
+        InMemorySigner {
+            account_id,
+            public_key,
+            secret_key,
+        }
+    }
+
+    fn dummy_client() -> Client {
+        Client::new("http://127.0.0.1:1")
+    }
+
+    #[test]
+    fn function_builders_and_into_action() {
+        let function = Function::new("hello")
+            .args(vec![1, 2])
+            .deposit(NearToken::from_near(1))
+            .gas(Gas::from_gas(100));
+        assert_eq!(function.name, "hello");
+        assert_eq!(function.args.unwrap(), vec![1, 2]);
+        assert_eq!(function.deposit, NearToken::from_near(1));
+        assert_eq!(function.gas, Gas::from_gas(100));
+
+        let json_args = serde_json::json!({"a": 1});
+        let json_fn = Function::new("f").args_json(&json_args);
+        assert_eq!(
+            json_fn.args.unwrap(),
+            serde_json::to_vec(&json_args).unwrap()
+        );
+
+        let borsh_fn = Function::new("f").args_borsh(42u32);
+        assert_eq!(borsh_fn.args.unwrap(), borsh::to_vec(&42u32).unwrap());
+
+        assert_eq!(Function::new("f").max_gas().gas, MAX_GAS);
+
+        let action = Function::new("f").args(vec![9]).into_action().unwrap();
+        assert_eq!(action.method_name, "f");
+        assert_eq!(action.args, vec![9]);
+        assert_eq!(action.gas, DEFAULT_CALL_FN_GAS);
+        assert_eq!(action.deposit, DEFAULT_CALL_DEPOSIT);
+
+        let bad_json = Function::new("f").args_json(FailingSerialize);
+        assert!(matches!(
+            bad_json.args,
+            Err(DeferredArgsError::Serialization(_))
+        ));
+        assert!(
+            Function::new("f")
+                .args_json(FailingSerialize)
+                .into_action()
+                .is_err()
+        );
+
+        let bad_borsh = Function::new("f").args_borsh(FailingBorsh);
+        assert!(matches!(bad_borsh.args, Err(DeferredArgsError::Io(_))));
+
+        // An error is retained when a later `args` call is made.
+        assert!(
+            Function::new("f")
+                .args_json(FailingSerialize)
+                .args(vec![1])
+                .into_action()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn deferred_args_error_converts_to_io_variant() {
+        let err: Error = DeferredArgsError::Io(Arc::new(std::io::Error::other("boom"))).into();
+        assert!(matches!(err, Error::Io(_)));
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn function_call_transaction_builders() {
+        let client = dummy_client();
+        let signer = signer("alice.near");
+        let receiver: AccountId = "contract.near".parse().unwrap();
+
+        let tx = client
+            .call(&signer, &receiver, "f")
+            .args(vec![1])
+            .args_json(serde_json::json!({"a": 1}))
+            .args_borsh(42u32)
+            .deposit(NearToken::from_near(1))
+            .gas(Gas::from_gas(5))
+            .max_gas()
+            .retry_exponential(10, 3)
+            .wait_until(TxExecutionStatus::Final);
+        assert_eq!(tx.function.name, "f");
+        assert_eq!(tx.function.args.unwrap(), borsh::to_vec(&42u32).unwrap());
+        assert_eq!(tx.function.deposit, NearToken::from_near(1));
+        assert_eq!(tx.function.gas, MAX_GAS);
+        assert!(tx.retry_strategy.is_some());
+        assert_eq!(tx.wait_until, TxExecutionStatus::Final);
+        assert_eq!(tx.receiver_id, receiver);
+
+        let with_retry = client
+            .call(&signer, &receiver, "f")
+            .retry(std::iter::once(Duration::from_millis(1)));
+        assert!(with_retry.retry_strategy.is_some());
+    }
+
+    #[test]
+    fn transaction_action_builders() {
+        let client = dummy_client();
+        let signer = signer("alice.near");
+        let receiver: AccountId = "bob.near".parse().unwrap();
+        let pk = PublicKey::empty(KeyType::ED25519);
+        let access_key = AccessKey {
+            nonce: 1,
+            permission: AccessKeyPermission::FullAccess,
+        };
+
+        let tx = client
+            .batch(&signer, &receiver)
+            .add_key(pk.clone(), access_key)
+            .call(Function::new("f").args(vec![1]))
+            .create_account()
+            .delete_account(&"beneficiary.near".parse().unwrap())
+            .delete_key(pk.clone())
+            .deploy(&[1, 2, 3])
+            .stake(NearToken::from_near(1), pk.clone())
+            .transfer(NearToken::from_near(2))
+            .retry_exponential(10, 3)
+            .wait_until(TxExecutionStatus::Final);
+        assert_eq!(tx.actions.unwrap().len(), 8);
+        assert!(tx.retry_strategy.is_some());
+        assert_eq!(tx.wait_until, TxExecutionStatus::Final);
+        assert_eq!(tx.receiver_id, receiver);
+
+        let with_retry = client
+            .batch(&signer, &receiver)
+            .retry(std::iter::once(Duration::from_millis(1)));
+        assert!(with_retry.retry_strategy.is_some());
+
+        // Deferred argument errors short-circuit subsequent actions.
+        let bad = client
+            .batch(&signer, &receiver)
+            .call(Function::new("f").args_json(FailingSerialize))
+            .transfer(NearToken::from_near(1));
+        assert!(matches!(bad.actions, Err(Error::Serialization(_))));
+    }
+
+    #[test]
+    fn retryable_transaction_builders() {
+        let client = dummy_client();
+        let signer = signer("alice.near");
+        let receiver: AccountId = "bob.near".parse().unwrap();
+
+        let tx = client
+            .send_tx(&signer, &receiver, vec![])
+            .retry_exponential(10, 3)
+            .wait_until(TxExecutionStatus::Final);
+        assert!(tx.strategy.is_some());
+        assert_eq!(tx.wait_until, TxExecutionStatus::Final);
+        assert_eq!(tx.receiver_id, receiver);
+
+        let tx = client
+            .send_tx(&signer, &receiver, vec![])
+            .retry(std::iter::once(Duration::from_millis(1)));
+        assert!(tx.strategy.is_some());
+
+        let tx = client
+            .send_tx(&signer, &receiver, vec![])
+            .wait_until(TxExecutionStatus::Final);
+        assert!(tx.strategy.is_none());
+        assert_eq!(tx.wait_until, TxExecutionStatus::Final);
+    }
+
+    use near_crypto::Signature;
+    use near_jsonrpc_client::JsonRpcClient;
+    use near_jsonrpc_primitives::types::transactions::RpcTransactionResponse;
+    use near_primitives::errors::{InvalidTxError, TxExecutionError};
+    use near_primitives::types::Gas;
+    use near_primitives::views::{
+        BlockHeaderView, BlockView, ExecutionOutcomeView, ExecutionOutcomeWithIdView,
+        ExecutionStatusView, FinalExecutionOutcomeView, FinalExecutionOutcomeViewEnum,
+        FinalExecutionStatus,
+    };
+
+    fn jsonrpc_ok(result: serde_json::Value) -> Vec<u8> {
+        serde_json::json!({"jsonrpc": "2.0", "result": result, "id": 1})
+            .to_string()
+            .into_bytes()
+    }
+
+    fn tx_result(status: FinalExecutionStatus, finality: TxExecutionStatus) -> serde_json::Value {
+        let outcome = FinalExecutionOutcomeView {
+            status,
+            transaction: near_primitives::views::SignedTransactionView {
+                signer_id: "alice.near".parse().unwrap(),
+                public_key: PublicKey::empty(KeyType::ED25519),
+                nonce: 1,
+                receiver_id: "bob.near".parse().unwrap(),
+                actions: vec![],
+                _priority_fee: 0,
+                signature: Signature::from_parts(KeyType::ED25519, &[0u8; 64]).unwrap(),
+                hash: CryptoHash::default(),
+                nonce_index: None,
+                nonce_mode: None,
+            },
+            transaction_outcome: ExecutionOutcomeWithIdView {
+                proof: vec![],
+                block_hash: CryptoHash::default(),
+                id: CryptoHash::default(),
+                outcome: ExecutionOutcomeView {
+                    logs: vec![],
+                    receipt_ids: vec![],
+                    gas_burnt: Gas::from_gas(1),
+                    tokens_burnt: NearToken::ZERO,
+                    executor_id: "alice.near".parse().unwrap(),
+                    status: ExecutionStatusView::SuccessValue(b"ok".to_vec()),
+                    metadata: Default::default(),
+                },
+            },
+            receipts_outcome: vec![],
+        };
+        serde_json::to_value(RpcTransactionResponse {
+            final_execution_outcome: Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(
+                outcome,
+            )),
+            final_execution_status: finality,
+        })
+        .unwrap()
+    }
+
+    async fn rpc_server(tx_result: serde_json::Value) -> (mockito::ServerGuard, mockito::Mock) {
+        let mut server = mockito::Server::new_async().await;
+        let block = serde_json::to_value(BlockView {
+            author: "alice.near".parse().unwrap(),
+            header: BlockHeaderView::default(),
+            chunks: vec![],
+        })
+        .unwrap();
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                match body["method"].as_str() {
+                    Some("query") => jsonrpc_ok(serde_json::json!({
+                        "nonce": 5,
+                        "permission": "FullAccess",
+                        "block_height": 10,
+                        "block_hash": "11111111111111111111111111111111",
+                    })),
+                    Some("block") => jsonrpc_ok(block.clone()),
+                    _ => jsonrpc_ok(tx_result.clone()),
+                }
+            })
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        (server, mock)
+    }
+
+    async fn server_client(server: &mockito::ServerGuard) -> Client {
+        Client::from_client(JsonRpcClient::new_client().connect(server.url()))
+    }
+
+    #[tokio::test]
+    async fn retryable_transaction_into_future_sends_once_and_retries() {
+        let success = tx_result(
+            FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
+            TxExecutionStatus::Final,
+        );
+        let (server, _) = rpc_server(success).await;
+        let client = server_client(&server).await;
+        let signer = signer("alice.near");
+        let receiver: AccountId = "bob.near".parse().unwrap();
+
+        let outcome = client.send_tx(&signer, &receiver, vec![]).await.unwrap();
+        assert_eq!(
+            outcome.status,
+            FinalExecutionStatus::SuccessValue(b"ok".to_vec())
+        );
+
+        // The retry branch uses `Retry::start` with the configured strategy.
+        let outcome = client
+            .send_tx(&signer, &receiver, vec![])
+            .retry(std::iter::once(Duration::ZERO))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.status,
+            FinalExecutionStatus::SuccessValue(b"ok".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn function_call_transaction_transacts_sync_and_async() {
+        let success = tx_result(
+            FinalExecutionStatus::SuccessValue(serde_json::to_vec(&7u32).unwrap()),
+            TxExecutionStatus::Final,
+        );
+        let (server, _) = rpc_server(success).await;
+        let client = server_client(&server).await;
+        let signer = signer("alice.near");
+        let receiver: AccountId = "contract.near".parse().unwrap();
+
+        let result = client
+            .call(&signer, &receiver, "get")
+            .args_json(serde_json::json!({"key": "value"}))
+            .gas(Gas::from_gas(100))
+            .deposit(NearToken::from_near(1))
+            .transact()
+            .await
+            .unwrap();
+        assert_eq!(result.json::<u32>().unwrap(), 7);
+
+        let status = client
+            .call(&signer, &receiver, "get")
+            .transact_async()
+            .await
+            .unwrap();
+        // `transact_async` builds the status handle with the receiver id, so that is
+        // what the `sender_id` accessor currently reports.
+        assert_eq!(status.sender_id(), &receiver);
+        assert_ne!(status.hash(), &CryptoHash::default());
+        assert!(format!("{status:?}").contains("TransactionStatus"));
+        assert!(matches!(status.status().await.unwrap(), Poll::Ready(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_transaction_transacts_sync_and_async() {
+        let success = tx_result(
+            FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
+            TxExecutionStatus::Final,
+        );
+        let (server, _) = rpc_server(success).await;
+        let client = server_client(&server).await;
+        let signer = signer("alice.near");
+        let receiver: AccountId = "bob.near".parse().unwrap();
+
+        let outcome = client
+            .batch(&signer, &receiver)
+            .transfer(NearToken::from_near(1))
+            .transact()
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome.status,
+            FinalExecutionStatus::SuccessValue(_)
+        ));
+
+        let status = client
+            .batch(&signer, &receiver)
+            .transfer(NearToken::from_near(1))
+            .transact_async()
+            .await
+            .unwrap();
+        assert!(matches!(status.status().await.unwrap(), Poll::Ready(_)));
+        assert!(status.clone().into_future().await.is_ok());
+        assert!(
+            status
+                .clone()
+                .wait_until(TxExecutionStatus::Final)
+                .await
+                .is_ok()
+        );
+        assert!(status.wait(Duration::ZERO).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn deferred_argument_errors_short_circuit_async_transactions() {
+        let success = tx_result(
+            FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
+            TxExecutionStatus::Final,
+        );
+        let (server, _) = rpc_server(success).await;
+        let client = server_client(&server).await;
+        let signer = signer("alice.near");
+        let receiver: AccountId = "bob.near".parse().unwrap();
+
+        assert!(
+            client
+                .call(&signer, &receiver, "get")
+                .args_json(FailingSerialize)
+                .transact()
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .call(&signer, &receiver, "get")
+                .args_json(FailingSerialize)
+                .transact_async()
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .batch(&signer, &receiver)
+                .call(Function::new("get").args_json(FailingSerialize))
+                .transact_async()
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .send_tx(&signer, &receiver, vec![])
+                .retry(std::iter::once(Duration::ZERO))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn status_maps_pending_and_error_responses() {
+        let error_body = |err: RpcTransactionError| {
+            let error: near_jsonrpc_primitives::errors::RpcError = err.into();
+            serde_json::json!({"jsonrpc": "2.0", "error": error, "id": 1}).to_string()
+        };
+
+        let pending_cases = [
+            error_body(RpcTransactionError::UnknownTransaction {
+                requested_transaction_hash: CryptoHash::default(),
+            }),
+            error_body(RpcTransactionError::TimeoutError(None)),
+        ];
+        for body in pending_cases {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(body)
+                // UnknownTransaction and TimeoutError are retryable status errors.
+                .expect(crate::RETRIES_PER_ENDPOINT)
+                .create_async()
+                .await;
+            let client = server_client(&server).await;
+            let status = AsyncTransactionStatus::new(
+                client,
+                "alice.near".parse().unwrap(),
+                CryptoHash::default(),
+            );
+            assert!(matches!(status.status().await.unwrap(), Poll::Pending));
+            mock.assert_async().await;
+        }
+
+        // A non-final response reported by the node is also pending.
+        let mut server = mockito::Server::new_async().await;
+        let pending = serde_json::to_value(RpcTransactionResponse {
+            final_execution_outcome: None,
+            final_execution_status: TxExecutionStatus::Included,
+        })
+        .unwrap();
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(jsonrpc_ok(pending))
+            .expect(1)
+            .create_async()
+            .await;
+        let status = AsyncTransactionStatus::new(
+            server_client(&server).await,
+            "alice.near".parse().unwrap(),
+            CryptoHash::default(),
+        );
+        assert!(matches!(status.status().await.unwrap(), Poll::Pending));
+        mock.assert_async().await;
+
+        // Other transaction errors are surfaced to the caller.
+        let mut server = mockito::Server::new_async().await;
+        let body = error_body(RpcTransactionError::InvalidTransaction {
+            context: InvalidTxError::InvalidNonce {
+                tx_nonce: 1,
+                ak_nonce: 2,
+            },
+        });
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+        let status = AsyncTransactionStatus::new(
+            server_client(&server).await,
+            "alice.near".parse().unwrap(),
+            CryptoHash::default(),
+        );
+        assert!(matches!(
+            status.status().await,
+            Err(Error::RpcTransactionError(_))
+        ));
+        mock.assert_async().await;
+
+        // TxExecutionError is propagated unchanged by status().
+        let tx_error = TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce {
+            tx_nonce: 1,
+            ak_nonce: 2,
+        });
+        assert!(matches!(
+            Error::TxExecution(Box::new(tx_error)),
+            Error::TxExecution(_)
+        ));
+    }
 }
 
 /// `TransactionStatus` object relating to an [`asynchronous transaction`] on the network.

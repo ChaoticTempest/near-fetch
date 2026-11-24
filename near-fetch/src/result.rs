@@ -348,3 +348,198 @@ impl Value {
         Ok(general_purpose::STANDARD.decode(&self.repr)?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_crypto::{KeyType, PublicKey, Signature};
+    use near_primitives::errors::{InvalidTxError, TxExecutionError};
+    use near_primitives::hash::CryptoHash;
+    use near_primitives::types::AccountId;
+    use near_primitives::views::ExecutionOutcomeView;
+    use near_token::NearToken;
+
+    fn account(id: &str) -> AccountId {
+        id.parse().unwrap()
+    }
+
+    fn outcome(status: ExecutionStatusView, logs: &[&str], gas: u64) -> ExecutionOutcomeWithIdView {
+        ExecutionOutcomeWithIdView {
+            proof: vec![],
+            block_hash: CryptoHash::default(),
+            id: CryptoHash::default(),
+            outcome: ExecutionOutcomeView {
+                logs: logs.iter().map(|s| (*s).to_string()).collect(),
+                receipt_ids: vec![],
+                gas_burnt: Gas::from_gas(gas),
+                tokens_burnt: NearToken::from_yoctonear(0),
+                executor_id: account("alice.near"),
+                status,
+                metadata: Default::default(),
+            },
+        }
+    }
+
+    fn transaction() -> SignedTransactionView {
+        SignedTransactionView {
+            signer_id: account("alice.near"),
+            public_key: PublicKey::empty(KeyType::ED25519),
+            nonce: 1,
+            receiver_id: account("bob.near"),
+            actions: vec![],
+            _priority_fee: 0,
+            signature: Signature::from_parts(KeyType::ED25519, &[0u8; 64]).unwrap(),
+            hash: CryptoHash::default(),
+            nonce_index: None,
+            nonce_mode: None,
+        }
+    }
+
+    fn view(
+        status: FinalExecutionStatus,
+        transaction_status: ExecutionStatusView,
+        receipts: Vec<ExecutionStatusView>,
+    ) -> FinalExecutionOutcomeView {
+        FinalExecutionOutcomeView {
+            status,
+            transaction: transaction(),
+            transaction_outcome: outcome(transaction_status, &["tx log"], 10),
+            receipts_outcome: receipts
+                .into_iter()
+                .map(|status| outcome(status, &["receipt log"], 5))
+                .collect(),
+        }
+    }
+
+    fn failure() -> TxExecutionError {
+        TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce {
+            tx_nonce: 1,
+            ak_nonce: 2,
+        })
+    }
+
+    fn success(bytes: &[u8]) -> ExecutionFinalResult {
+        ExecutionFinalResult::from_view(view(
+            FinalExecutionStatus::SuccessValue(bytes.to_vec()),
+            ExecutionStatusView::SuccessValue(b"ok".to_vec()),
+            vec![],
+        ))
+    }
+
+    #[test]
+    fn into_result_maps_success_value_and_gas() {
+        let result = success(b"42");
+        assert!(result.is_success());
+        assert!(!result.is_failure());
+        assert_eq!(result.total_gas_burnt(), Gas::from_gas(10));
+        assert_eq!(
+            result.status(),
+            &FinalExecutionStatus::SuccessValue(b"42".to_vec())
+        );
+
+        let unwrapped = result.unwrap();
+        assert_eq!(unwrapped.raw_bytes().unwrap(), b"42");
+        assert_eq!(unwrapped.json::<u32>().unwrap(), 42);
+    }
+
+    #[test]
+    fn into_result_maps_failure_and_non_final_statuses() {
+        let failed = ExecutionFinalResult::from_view(view(
+            FinalExecutionStatus::Failure(failure()),
+            ExecutionStatusView::Failure(failure()),
+            vec![],
+        ));
+        assert!(failed.is_failure());
+        assert!(!failed.is_success());
+        assert!(matches!(failed.into_result(), Err(Error::TxExecution(_))));
+
+        let not_started = ExecutionFinalResult::from_view(view(
+            FinalExecutionStatus::NotStarted,
+            ExecutionStatusView::Unknown,
+            vec![],
+        ));
+        assert!(matches!(
+            not_started.into_result(),
+            Err(Error::TxStatus("NotStarted"))
+        ));
+
+        let started = ExecutionFinalResult::from_view(view(
+            FinalExecutionStatus::Started,
+            ExecutionStatusView::Unknown,
+            vec![],
+        ));
+        assert!(matches!(
+            started.into_result(),
+            Err(Error::TxStatus("Started"))
+        ));
+    }
+
+    #[test]
+    fn decoding_helpers_propagate_errors() {
+        let bad_json = success(b"not json");
+        assert!(bad_json.into_result().unwrap().json::<u32>().is_err());
+
+        let bad_borsh = success(&[]);
+        assert!(bad_borsh.into_result().unwrap().borsh::<u32>().is_err());
+
+        let invalid_base64 = Value {
+            repr: "!!!not-base64!!!".into(),
+        };
+        assert!(invalid_base64.raw_bytes().is_err());
+        assert!(invalid_base64.json::<u32>().is_err());
+        assert!(invalid_base64.borsh::<u32>().is_err());
+
+        let valid_borsh = Value {
+            repr: general_purpose::STANDARD.encode(borsh::to_vec(&42u32).unwrap()),
+        };
+        assert_eq!(valid_borsh.borsh::<u32>().unwrap(), 42);
+    }
+
+    #[test]
+    fn execution_final_result_delegates_to_details() {
+        let result = ExecutionFinalResult::from_view(view(
+            FinalExecutionStatus::SuccessValue(b"\"hello\"".to_vec()),
+            ExecutionStatusView::Failure(failure()),
+            vec![
+                ExecutionStatusView::Failure(failure()),
+                ExecutionStatusView::SuccessValue(b"ok".to_vec()),
+            ],
+        ));
+
+        assert_eq!(result.outcome().outcome.logs, vec!["tx log"]);
+        assert_eq!(result.outcomes().len(), 3);
+        assert_eq!(result.receipt_outcomes().len(), 2);
+        assert_eq!(result.failures().len(), 2);
+        assert_eq!(result.receipt_failures().len(), 1);
+        assert_eq!(result.logs(), vec!["tx log", "receipt log", "receipt log"]);
+        assert_eq!(result.total_gas_burnt(), Gas::from_gas(20));
+        assert_eq!(result.json::<String>().unwrap(), "hello");
+    }
+
+    #[test]
+    fn execution_success_and_details_helpers() {
+        let result = ExecutionFinalResult::from_view(view(
+            FinalExecutionStatus::SuccessValue(serde_json::to_vec(&7u32).unwrap()),
+            ExecutionStatusView::SuccessValue(b"ok".to_vec()),
+            vec![ExecutionStatusView::Failure(failure())],
+        ));
+        let success = result.into_result().unwrap();
+
+        assert_eq!(success.json::<u32>().unwrap(), 7);
+        assert!(success.borsh::<u32>().is_err());
+        assert_eq!(success.outcome().outcome.logs, vec!["tx log"]);
+        assert_eq!(success.outcomes().len(), 2);
+        assert_eq!(success.receipt_outcomes().len(), 1);
+        assert_eq!(success.failures().len(), 1);
+        assert_eq!(success.receipt_failures().len(), 1);
+        assert_eq!(success.logs(), vec!["tx log", "receipt log"]);
+
+        let details = success.details;
+        assert_eq!(details.outcome().outcome.logs, vec!["tx log"]);
+        assert_eq!(details.outcomes().len(), 2);
+        assert_eq!(details.receipt_outcomes().len(), 1);
+        assert_eq!(details.failures().len(), 1);
+        assert_eq!(details.receipt_failures().len(), 1);
+        assert_eq!(details.logs(), vec!["tx log", "receipt log"]);
+    }
+}

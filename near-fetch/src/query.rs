@@ -885,4 +885,345 @@ mod tests {
             "7"
         );
     }
+
+    use near_crypto::KeyType;
+    use near_jsonrpc_primitives::types::query::QueryResponseKind;
+    use near_primitives::types::SyncCheckpoint;
+    use near_primitives::views::{
+        AccessKeyPermissionView, BlockHeaderView, ContractCodeView, GasPriceView,
+    };
+
+    fn account(id: &str) -> AccountId {
+        id.parse().unwrap()
+    }
+
+    fn response(kind: QueryResponseKind) -> RpcQueryResponse {
+        RpcQueryResponse {
+            kind,
+            block_height: 9,
+            block_hash: CryptoHash::default(),
+        }
+    }
+
+    fn account_view() -> AccountView {
+        AccountView {
+            amount: near_token::NearToken::from_near(1),
+            locked: near_token::NearToken::ZERO,
+            code_hash: CryptoHash::default(),
+            storage_usage: 0,
+            storage_paid_at: 0,
+            global_contract_hash: None,
+            global_contract_account_id: None,
+            state: Default::default(),
+            bootstrap_nonce: None,
+        }
+    }
+
+    fn wrong_kind() -> QueryResponseKind {
+        QueryResponseKind::ViewAccount(account_view())
+    }
+
+    fn invalid_data(err: Result<impl std::fmt::Debug>) {
+        assert!(
+            matches!(err, Err(Error::RpcReturnedInvalidData(_))),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_request_for_every_query_type() {
+        let client = dummy_client();
+        let block = BlockReference::Finality(Finality::Final);
+
+        let view = client.view(&account("contract.near"), "get_info");
+        let method = view.method.build_request(block.clone()).unwrap();
+        match method.request {
+            QueryRequest::CallFunction {
+                account_id,
+                method_name,
+                ..
+            } => {
+                assert_eq!(account_id, account("contract.near"));
+                assert_eq!(method_name, "get_info");
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        // Force a deferred serialization error to exercise the `?` in build_request.
+        let deferred = Function {
+            name: "get".into(),
+            args: Err(crate::ops::DeferredArgsError::Serialization(
+                std::sync::Arc::new(serde_json::from_str::<u8>("nope").unwrap_err()),
+            )),
+            deposit: near_token::NearToken::ZERO,
+            gas: near_primitives::types::Gas::from_gas(0),
+        };
+        let bad_args = ViewFunction {
+            account_id: account("contract.near"),
+            function: deferred,
+        };
+        assert!(matches!(
+            bad_args.build_request(block.clone()),
+            Err(Error::Serialization(_))
+        ));
+
+        let code = ViewCode {
+            account_id: account("contract.near"),
+        };
+        assert!(matches!(
+            code.build_request(block.clone()).unwrap().request,
+            QueryRequest::ViewCode { .. }
+        ));
+
+        let view_account = ViewAccount {
+            account_id: account("alice.near"),
+        };
+        assert!(matches!(
+            view_account.build_request(block.clone()).unwrap().request,
+            QueryRequest::ViewAccount { .. }
+        ));
+
+        let block_request = ViewBlock.build_request(block.clone()).unwrap();
+        assert_eq!(block_request.block_reference, block);
+
+        let state = ViewState {
+            account_id: account("alice.near"),
+            prefix: Some(vec![1, 2, 3]),
+        };
+        match state.build_request(block.clone()).unwrap().request {
+            QueryRequest::ViewState {
+                account_id,
+                prefix,
+                after_key,
+                limit,
+                include_proof,
+            } => {
+                assert_eq!(account_id, account("alice.near"));
+                assert_eq!(prefix, StoreKey::from(vec![1, 2, 3]));
+                assert!(after_key.is_none());
+                assert!(limit.is_none());
+                assert!(!include_proof);
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        let key = ViewAccessKey {
+            account_id: account("alice.near"),
+            public_key: PublicKey::empty(KeyType::ED25519),
+        };
+        assert!(matches!(
+            key.build_request(block.clone()).unwrap().request,
+            QueryRequest::ViewAccessKey { .. }
+        ));
+
+        let keys = ViewAccessKeyList {
+            account_id: account("alice.near"),
+        };
+        match keys.build_request(block.clone()).unwrap().request {
+            QueryRequest::ViewAccessKeyList {
+                account_id,
+                after_key,
+                limit,
+            } => {
+                assert_eq!(account_id, account("alice.near"));
+                assert!(after_key.is_none());
+                assert!(limit.is_none());
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        let gas = GasPrice;
+        let by_height = gas.build_request(BlockId::Height(11).into()).unwrap();
+        assert_eq!(by_height.block_id, Some(BlockId::Height(11)));
+        let by_default = gas.build_request(block).unwrap();
+        assert_eq!(by_default.block_id, None);
+        invalid_data(
+            gas.build_request(BlockReference::SyncCheckpoint(SyncCheckpoint::Genesis))
+                .map(|_| ()),
+        );
+    }
+
+    #[test]
+    fn process_response_for_every_query_type_and_wrong_kind() {
+        let call = ViewFunction {
+            account_id: account("c.near"),
+            function: Function::new("get"),
+        };
+        let view_result = call
+            .process_response(response(QueryResponseKind::CallResult(CallResult {
+                result: b"hi".to_vec(),
+                logs: vec!["log".into()],
+            })))
+            .unwrap();
+        assert_eq!(view_result.result, b"hi");
+        assert_eq!(view_result.logs, vec!["log"]);
+        invalid_data(call.process_response(response(wrong_kind())));
+
+        let code = ViewCode {
+            account_id: account("c.near"),
+        };
+        let bytes = code
+            .process_response(response(QueryResponseKind::ViewCode(ContractCodeView {
+                code: vec![1, 2, 3],
+                hash: CryptoHash::default(),
+            })))
+            .unwrap();
+        assert_eq!(bytes, vec![1, 2, 3]);
+        invalid_data(code.process_response(response(wrong_kind())));
+
+        let view_account = ViewAccount {
+            account_id: account("c.near"),
+        };
+        assert_eq!(
+            view_account
+                .process_response(response(QueryResponseKind::ViewAccount(account_view())))
+                .unwrap()
+                .amount,
+            near_token::NearToken::from_near(1)
+        );
+        invalid_data(
+            view_account.process_response(response(QueryResponseKind::CallResult(
+                CallResult::default(),
+            ))),
+        );
+
+        // ViewBlock is a pass-through: the response is the block itself.
+        let block_view = BlockView {
+            author: account("c.near"),
+            header: BlockHeaderView::default(),
+            chunks: vec![],
+        };
+        assert_eq!(
+            ViewBlock
+                .process_response(block_view.clone())
+                .unwrap()
+                .author,
+            block_view.author
+        );
+
+        let state = ViewState {
+            account_id: account("c.near"),
+            prefix: None,
+        };
+        let state_result = state
+            .process_response(response(QueryResponseKind::ViewState(ViewStateResult {
+                values: vec![],
+                proof: vec![],
+                last_key: None,
+            })))
+            .unwrap();
+        assert!(state_result.values.is_empty());
+        invalid_data(state.process_response(response(wrong_kind())));
+
+        let key = ViewAccessKey {
+            account_id: account("c.near"),
+            public_key: PublicKey::empty(KeyType::ED25519),
+        };
+        assert_eq!(
+            key.process_response(response(QueryResponseKind::AccessKey(AccessKeyView {
+                nonce: 5,
+                permission: AccessKeyPermissionView::FullAccess,
+            })))
+            .unwrap()
+            .nonce,
+            5
+        );
+        invalid_data(key.process_response(response(wrong_kind())));
+
+        let keys = ViewAccessKeyList {
+            account_id: account("c.near"),
+        };
+        let list = keys
+            .process_response(response(QueryResponseKind::AccessKeyList(AccessKeyList {
+                keys: vec![],
+                last_key: None,
+            })))
+            .unwrap();
+        assert!(list.keys.is_empty());
+        invalid_data(keys.process_response(response(wrong_kind())));
+
+        let gas = GasPrice;
+        assert_eq!(
+            gas.process_response(GasPriceView {
+                gas_price: near_token::NearToken::from_near(2),
+            })
+            .unwrap(),
+            near_token::NearToken::from_near(2)
+        );
+    }
+
+    #[test]
+    fn view_result_decode_errors_and_conversion() {
+        let result = ViewResult {
+            result: b"not json".to_vec(),
+            logs: vec![],
+        };
+        assert!(result.json::<u32>().is_err());
+        assert!(result.borsh::<u32>().is_err());
+
+        let from_call: ViewResult = CallResult {
+            result: vec![9],
+            logs: vec!["a".into()],
+        }
+        .into();
+        assert_eq!(from_call.result, vec![9]);
+        assert_eq!(from_call.logs, vec!["a"]);
+    }
+
+    #[test]
+    fn query_builders_apply_block_references_and_arguments() {
+        let client = dummy_client();
+
+        let by_height = client.view_block().block_height(7);
+        assert_eq!(by_height.block_ref, Some(BlockId::Height(7).into()));
+        let by_hash = client.view_block().block_hash(CryptoHash::default());
+        assert!(matches!(
+            by_hash.block_ref,
+            Some(BlockReference::BlockId(BlockId::Hash(_)))
+        ));
+        let by_finality = client
+            .view_account(&account("alice.near"))
+            .finality(Finality::Final);
+        assert_eq!(by_finality.block_ref, Some(Finality::Final.into()));
+
+        let state = client.view_state(&account("alice.near")).prefix(&[4, 5]);
+        assert_eq!(state.method.prefix, Some(vec![4, 5]));
+
+        let view = client
+            .view(&account("c.near"), "get")
+            .args(vec![1])
+            .args_json(serde_json::json!({"a": 1}))
+            .args_borsh(42u32);
+        assert_eq!(
+            view.method.function.args.as_ref().unwrap(),
+            &borsh::to_vec(&42u32).unwrap()
+        );
+
+        // Chunk builders record the selected reference.
+        let chunk = client.view_chunk();
+        assert!(chunk.chunk_ref.is_none());
+        assert!(
+            client
+                .view_chunk()
+                .chunk_hash(CryptoHash::default())
+                .chunk_ref
+                .is_some()
+        );
+        assert!(
+            client
+                .view_chunk()
+                .block_hash_and_shard(CryptoHash::default(), ShardId::from(0))
+                .chunk_ref
+                .is_some()
+        );
+        assert!(
+            client
+                .view_chunk()
+                .block_height_and_shard(5, ShardId::from(1))
+                .chunk_ref
+                .is_some()
+        );
+
+        assert_eq!(client.gas_price().client.rpc_addr(), client.rpc_addr());
+    }
 }
