@@ -26,8 +26,9 @@ false`) package that holds runnable examples and depends on the library by path.
 
 ## Commands
 
-There is **no CI configuration** in this repository (no `.github/workflows` or
-equivalent). The following are the de facto quality gate and must all pass
+The quality gate lives in the root `justfile`: `just ci` runs the full gate,
+and `just --list` lists every available recipe. `just install` sets up the
+required local tooling. The commands below make up that gate and must all pass
 before handing work back:
 
 ```sh
@@ -35,10 +36,13 @@ cargo check --workspace --all-targets
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo doc -p near-fetch --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc -p near-fetch --no-deps
+cargo llvm-cov --package near-fetch --all-targets --summary-only --fail-under-lines 95
 ```
 
-`cargo doc -p near-fetch --no-deps` must emit zero warnings.
+`cargo doc -p near-fetch --no-deps` must emit zero warnings. CI runs three
+parallel jobs on pull requests and pushes to `main`: `quality` (`just ci`),
+`msrv` (Rust 1.95: `just check`, `just test`), and `features` (`just features`).
 
 ## Testing
 
