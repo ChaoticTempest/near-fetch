@@ -1,5 +1,7 @@
 # NEAR Fetch
 
+[![crates.io](https://img.shields.io/crates/v/near-fetch.svg)](https://crates.io/crates/near-fetch) [![docs.rs](https://docs.rs/near-fetch/badge.svg)](https://docs.rs/near-fetch) [![downloads](https://img.shields.io/crates/d/near-fetch.svg)](https://crates.io/crates/near-fetch) [![license](https://img.shields.io/crates/l/near-fetch.svg)](https://github.com/ChaoticTempest/near-fetch) [![CI](https://github.com/ChaoticTempest/near-fetch/actions/workflows/ci.yml/badge.svg)](https://github.com/ChaoticTempest/near-fetch/actions/workflows/ci.yml)
+
 `near-fetch` is a high-level async Rust client for the NEAR protocol. It wraps
 `near-jsonrpc-client` with retrying requests, automatic failover across RPC
 endpoints, cached access-key nonces, and ergonomic builders for queries and
@@ -186,6 +188,6 @@ placeholder secret key with your own before running it.
 
 - [crates.io](https://crates.io/crates/near-fetch)
 - [docs.rs](https://docs.rs/near-fetch)
-- [Repository](https://github.com/ChaoticTempest/fetch)
+- [Repository](https://github.com/ChaoticTempest/near-fetch)
 
 Licensed under either MIT or Apache-2.0, at your option.
