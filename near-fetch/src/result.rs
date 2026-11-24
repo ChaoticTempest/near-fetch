@@ -104,9 +104,9 @@ pub struct ExecutionResult<T> {
 ///
 /// [`into_result`]: crate::result::ExecutionFinalResult::into_result
 #[derive(PartialEq, Eq, Clone, Debug)]
-// #[must_use = "use `into_result()` to handle potential execution errors"]
 pub struct ExecutionFinalResult {
     status: FinalExecutionStatus,
+    /// Transaction and receipt outcomes produced by the execution.
     pub details: ExecutionDetails,
 }
 
@@ -137,6 +137,7 @@ impl ExecutionFinalResult {
         }
     }
 
+    /// Sum of the gas burnt by the transaction and all of its receipts.
     pub fn total_gas_burnt(&self) -> Gas {
         let tx_gas = self.details.transaction_outcome.outcome.gas_burnt.as_gas();
         let receipts_gas: u64 = self
@@ -225,6 +226,7 @@ impl ExecutionFinalResult {
         self.details.logs()
     }
 
+    /// The final status reported by the network for this transaction.
     pub fn status(&self) -> &FinalExecutionStatus {
         &self.status
     }

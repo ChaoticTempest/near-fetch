@@ -1,3 +1,5 @@
+//! Signing helpers, NEP-413 off-chain messages, and key-rotating signers.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -81,6 +83,11 @@ pub struct KeyRotatingSigner {
 }
 
 impl KeyRotatingSigner {
+    /// Construct a signer from `(AccountId, SecretKey)` pairs.
+    ///
+    /// Returns [`Error::InvalidArgs`] if the iterator is empty or if the account
+    /// ids are not all identical, since a rotating signer only rotates keys for
+    /// a single account.
     pub fn try_from_iter(iter: impl IntoIterator<Item = (AccountId, SecretKey)>) -> Result<Self> {
         let (account_ids, secret_keys): (Vec<AccountId>, Vec<SecretKey>) = iter.into_iter().unzip();
         let mut account_ids = account_ids.into_iter();
@@ -98,6 +105,10 @@ impl KeyRotatingSigner {
         )))
     }
 
+    /// Construct a signer directly from an iterable of [`Signer`]s.
+    ///
+    /// The signers are rotated through in iteration order, one per call to [`Signer::sign`].
+    /// At least one signer must be supplied; otherwise rotation would divide by zero.
     pub fn from_signers(iterable: impl IntoIterator<Item = Signer>) -> Self {
         Self {
             signers: Arc::new(iterable.into_iter().collect()),
@@ -118,14 +129,19 @@ impl KeyRotatingSigner {
         &self.signers[idx % self.signers.len()]
     }
 
+    /// The public key of the signer currently selected in the rotation.
     pub fn public_key(&self) -> PublicKey {
         self.current_signer().public_key()
     }
 
+    /// Sign `data` with the current signer, then rotate to the next one.
     pub fn sign(&self, data: &[u8]) -> Signature {
         self.fetch_and_rotate_signer().sign(data)
     }
 
+    /// Compute a VRF value and proof over `data` using the current signer.
+    ///
+    /// Unlike [`Signer::sign`], this does not advance the rotation.
     pub fn compute_vrf_with_proof(&self, data: &[u8]) -> (vrf::Value, vrf::Proof) {
         self.current_signer().compute_vrf_with_proof(data)
     }
@@ -133,6 +149,7 @@ impl KeyRotatingSigner {
 
 /// A trait for exposing the account id of any object.
 pub trait ExposeAccountId {
+    /// The account id this signer signs on behalf of.
     fn account_id(&self) -> &AccountId;
 }
 
@@ -159,13 +176,39 @@ impl ExposeAccountId for KeyRotatingSigner {
 
 /// A trait for extending the [`Signer`] trait with additional functionality.
 pub trait SignerExt: ExposeAccountId + Send + Sync {
+    /// Sign the given bytes with this signer's private key.
     fn sign(&self, data: &[u8]) -> Signature;
+
+    /// The public key associated with this signer's private key.
     fn public_key(&self) -> PublicKey;
 
     /// Signs an [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md) off-chain
     /// message, widely used for authentication and proof of account ownership. This is
     /// the same as signing the message's hash: computing the hash is infallible, but
     /// signing itself may panic (for example, [`Signer::Empty`]).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use near_account_id::AccountId;
+    /// use near_crypto::{InMemorySigner, KeyType, SecretKey};
+    /// use near_fetch::signer::{OffchainMessage, SignerExt};
+    ///
+    /// let account_id: AccountId = "alice.near".parse().unwrap();
+    /// let secret_key = SecretKey::from_random(KeyType::ED25519);
+    /// let public_key = secret_key.public_key();
+    /// let signer = InMemorySigner::from_secret_key(account_id, secret_key);
+    ///
+    /// let message = OffchainMessage {
+    ///     message: "Hello, NEAR!".to_string(),
+    ///     nonce: [0u8; 32],
+    ///     recipient: "myapp.com".to_string(),
+    ///     callback_url: None,
+    /// };
+    ///
+    /// let signature = signer.sign_offchain(&message);
+    /// assert!(signature.verify(message.compute_hash().as_ref(), &public_key));
+    /// ```
     fn sign_offchain(&self, message: &OffchainMessage) -> Signature {
         let hash = message.compute_hash();
         self.sign(hash.as_ref())
