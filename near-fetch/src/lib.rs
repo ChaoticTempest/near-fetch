@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use near_jsonrpc_client::methods::tx::RpcTransactionResponse;
 use tokio::sync::RwLock;
+use tokio_retry::{strategy::FixedInterval, RetryIf};
 
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
@@ -157,18 +158,19 @@ impl Client {
             if offset > 0 {
                 self.current_endpoint_idx.store(idx, Ordering::SeqCst);
             }
-            for _ in 0..RETRIES_PER_ENDPOINT {
-                match client.call(method).await {
-                    Ok(response) => {
-                        self.current_endpoint_idx.store(idx, Ordering::SeqCst);
-                        return Ok(response);
-                    }
-                    Err(err) if is_critical(&err) => return Err(err),
-                    Err(err) => {
-                        last_err = Some(err);
-                        tokio::time::sleep(RETRY_BACKOFF).await;
-                    }
+            let strategy = FixedInterval::new(RETRY_BACKOFF).take(RETRIES_PER_ENDPOINT - 1);
+            let retry = RetryIf::spawn(
+                strategy,
+                || client.call(method),
+                |err: &JsonRpcError<M::Error>| !is_critical(err),
+            );
+            match retry.await {
+                Ok(response) => {
+                    self.current_endpoint_idx.store(idx, Ordering::SeqCst);
+                    return Ok(response);
                 }
+                Err(e) if is_critical(&e) => return Err(e),
+                Err(e) => last_err = Some(e),
             }
         }
         // The index now points at the last endpoint attempted.
