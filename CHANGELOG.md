@@ -3,12 +3,11 @@
 All notable changes to `near-fetch` will be documented in this file. The format
 is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-> **0.13.0 is a breaking release for `0.12.x` consumers.** Cargo's default caret
-> requirement (`near-fetch = "0.12"`) will **not** auto-upgrade you to 0.13.0:
-> you must update the requirement explicitly and follow the migration notes
-> below.
+> This file tracks changes since the last published release, **0.12.0**
+> (tag `0.12`). Everything in `[Unreleased]` is not published yet; these breaking
+> changes are planned for the next minor release, 0.13.0.
 
-## [0.13.0] - 2026-11-24
+## [Unreleased]
 
 ### Breaking changes
 
@@ -82,3 +81,7 @@ is based on Keep a Changelog, and this project adheres to Semantic Versioning.
   (serialization versus I/O) instead of collapsing it.
 - Corrected 9 broken intra-doc links and filled in missing public-item
   documentation.
+
+## [0.12.0] - 2026-07-27
+
+Last published release. Tag [`0.12`](https://github.com/ChaoticTempest/near-fetch/releases/tag/0.12). See `[Unreleased]` above for everything since.
