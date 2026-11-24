@@ -1,0 +1,94 @@
+name: Release
+
+# Tag and publish a GitHub Release when a `release: X.Y.Z` change lands on main
+# and its CI run succeeds. This is driven by workflow_run (not pull_request) so
+# the privileged job only ever checks out the pushed commit on main; it never
+# checks out or executes pull-request head code.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  tag_and_release:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the released commit
+        uses: actions/checkout@v4
+        with:
+          # For a push event, workflow_run.head_sha is the commit on main.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "near-fetch") | .version')"
+          if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
+            echo "::error::Unable to read the near-fetch version from cargo metadata"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=$VERSION" >> "$GITHUB_ENV" # bare tag: no "v" prefix
+          echo "Resolved version $VERSION (tag $VERSION)"
+
+      - name: Require a matching release commit
+        run: |
+          set -euo pipefail
+          SUBJECT="$(jq -r '.workflow_run.head_commit.message | split("\n")[0]' "$GITHUB_EVENT_PATH")"
+          # Escape the dots in the semver so it is matched literally. A trailing
+          # " (#N)" from a squashed release PR is allowed; anything else (including
+          # legacy 2-component subjects) is rejected. No tag is made in that case.
+          VERSION_RE="${VERSION//./\\.}"
+          if ! printf '%s\n' "$SUBJECT" | grep -Eq "^release: ${VERSION_RE}( \(#[0-9]+\))?$"; then
+            echo "::error::Commit subject '$SUBJECT' is not a release for $VERSION."
+            echo "Expected exactly: release: $VERSION (optionally followed by ' (#N)')"
+            exit 1
+          fi
+          echo "Commit subject '$SUBJECT' matches version $VERSION"
+
+      - name: Create annotated tag (idempotent)
+        id: tag
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists; skipping tag creation and release."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "${TAG}"
+          git push origin "refs/tags/${TAG}"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Derive previous tag
+        id: previous
+        if: steps.tag.outputs.created == 'true'
+        run: |
+          set -euo pipefail
+          # Newest other tag by version sort, excluding the one just created.
+          # Handles modern (0.13.0) and legacy (0.12, 0.11.0) names alike; when
+          # there is none, leave the output empty and let GitHub infer it.
+          PREVIOUS_TAG="$(git tag --sort=-v:refname | grep -vFx "$TAG" | head -n 1 || true)"
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "previous_tag=${PREVIOUS_TAG}" >> "$GITHUB_OUTPUT"
+            echo "Previous tag for release notes: ${PREVIOUS_TAG}"
+          else
+            echo "No previous tag found; release notes will cover full history."
+          fi
+
+      - name: Create GitHub Release
+        if: steps.tag.outputs.created == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          generate_release_notes: true
+          previous_tag: ${{ steps.previous.outputs.previous_tag }}

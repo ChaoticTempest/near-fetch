@@ -105,6 +105,22 @@ this pattern and documenting it here.
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, `test:`, `docs:`,
   `chore:`, `refactor:`, `style:`).
 
+### Release automation
+
+When a PR titled `release: X.Y.Z` is merged to `main` and its CI run succeeds,
+the `Release` workflow (`.github/workflows/release.yml`) creates a bare
+annotated tag `X.Y.Z` (no `v` prefix) and a GitHub Release named after the tag
+with auto-generated release notes. Nothing is published to crates.io. The
+commit subject must be exactly `release: X.Y.Z`, optionally followed by
+` (#N)` for squashed merges, and the version must match `near-fetch/Cargo.toml`
+exactly, including all three components.
+
+Tagging is idempotent: an existing tag is left untouched and no duplicate
+Release is created. Legacy tags such as `0.11.0` and `0.12` are never rewritten
+or deleted; `previous_tag` for the generated notes is simply the newest other
+tag by version sort. The workflow only runs on successful `push` runs of CI on
+`main` and never checks out or executes pull-request head code.
+
 ## Lockfile
 
 `Cargo.lock` is gitignored (`.gitignore`, line 3) and must stay that way. A fresh

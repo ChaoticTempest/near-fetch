@@ -43,6 +43,18 @@ coverage:
 coverage-check:
     cargo llvm-cov --package near-fetch --all-targets --summary-only --fail-under-lines {{cov_floor}}
 
+# Validate near-fetch's Cargo.toml version, optionally against an expected X.Y.Z.
+release-check expected="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="$(cargo metadata --no-deps --format-version 1 \
+      | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "near-fetch"))')"
+    echo "near-fetch version: $version"
+    if [ -n "{{expected}}" ] && [ "$version" != "{{expected}}" ]; then
+      echo "error: expected {{expected}}, found $version" >&2
+      exit 1
+    fi
+
 # Check all feature combinations, including each TLS backend individually.
 features:
     cargo check --workspace --all-targets --all-features
