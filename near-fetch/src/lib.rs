@@ -1,17 +1,21 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use near_jsonrpc_client::methods::tx::RpcTransactionResponse;
 use tokio::sync::RwLock;
+use tokio_retry::{strategy::FixedInterval, RetryIf};
 
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
-use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
+use near_jsonrpc_client::errors::{
+    JsonRpcError, JsonRpcServerError, JsonRpcServerResponseStatusError,
+};
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
 use near_jsonrpc_client::{methods, JsonRpcClient, MethodCallResult};
-use near_jsonrpc_primitives::types::query::QueryResponseKind;
+use near_jsonrpc_primitives::types::query::{QueryResponseKind, RpcQueryError};
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::errors::{ActionError, ActionErrorKind, InvalidTxError, TxExecutionError};
 use near_primitives::hash::CryptoHash;
@@ -37,43 +41,141 @@ pub use crate::error::Error;
 /// Cache key for access key nonces.
 pub type CacheKey = (AccountId, PublicKey);
 
-/// Client that implements exponential retrying and caching of access key nonces.
+/// Total number of attempts per RPC endpoint before failing over, including the
+/// initial attempt (a value of 3 means 3 attempts, i.e. 2 retries).
+const RETRIES_PER_ENDPOINT: usize = 3;
+
+/// Time to wait between each retry attempt.
+const RETRY_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Client that implements exponential retrying and caching of access key nonces,
+/// with failover support across multiple RPC endpoints.
 #[derive(Clone, Debug)]
 pub struct Client {
-    rpc_client: JsonRpcClient,
+    /// RPC endpoints to use, where requests fail over to the next one when
+    /// the previous one keeps failing.
+    rpc_endpoints: Vec<JsonRpcClient>,
     /// AccessKey nonces to reference when sending transactions.
     access_key_nonces: Arc<RwLock<HashMap<CacheKey, AtomicU64>>>,
+    /// Index of the most recently selected RPC endpoint. Shared across clones so
+    /// that all clones of a client fail over together.
+    current_endpoint_idx: Arc<AtomicUsize>,
 }
 
 impl Client {
     /// Construct a new [`Client`] with the given RPC address.
     pub fn new(rpc_addr: &str) -> Self {
-        let connector = JsonRpcClient::new_client();
-        let rpc_client = connector.connect(rpc_addr);
-        Self::from_client(rpc_client)
+        Self::new_with_endpoints(std::slice::from_ref(&rpc_addr))
+    }
+
+    /// Construct a new [`Client`] with multiple RPC addresses, where requests will
+    /// failover to the next endpoint when the previous one fails.
+    pub fn new_with_endpoints(rpc_addrs: &[&str]) -> Self {
+        assert!(
+            !rpc_addrs.is_empty(),
+            "at least one RPC address is required"
+        );
+        let rpc_endpoints = rpc_addrs
+            .iter()
+            .map(|rpc_addr| JsonRpcClient::new_client().connect(*rpc_addr))
+            .collect();
+        Self::from_clients(rpc_endpoints)
     }
 
     /// Construct a [`Client`] from an existing [`JsonRpcClient`].
     pub fn from_client(client: JsonRpcClient) -> Self {
+        Self::from_clients(vec![client])
+    }
+
+    /// Construct a [`Client`] from a list of existing [`JsonRpcClient`]s, where requests
+    /// will failover to the next client when the previous one fails.
+    pub fn from_clients(clients: Vec<JsonRpcClient>) -> Self {
+        assert!(!clients.is_empty(), "at least one RPC client is required");
         Self {
-            rpc_client: client,
+            rpc_endpoints: clients,
             access_key_nonces: Arc::new(RwLock::new(HashMap::new())),
+            current_endpoint_idx: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    /// Internal reference to the [`JsonRpcClient`] that is utilized for all RPC calls.
+    /// Internal reference to the most recently selected [`JsonRpcClient`] used for RPC calls.
+    /// Under concurrent use, calls racing with each other may change the selection.
     pub fn inner(&self) -> &JsonRpcClient {
-        &self.rpc_client
+        &self.rpc_endpoints[self.current_endpoint_index()]
     }
 
-    /// Internal mutable reference to the [`JsonRpcClient`] that is utilized for all RPC calls.
+    /// Internal mutable reference to the most recently selected [`JsonRpcClient`] used for
+    /// RPC calls. Under concurrent use, calls racing with each other may change the selection.
     pub fn inner_mut(&mut self) -> &mut JsonRpcClient {
-        &mut self.rpc_client
+        let idx = self.current_endpoint_idx.load(Ordering::SeqCst);
+        &mut self.rpc_endpoints[idx]
     }
 
-    /// The RPC address the client is connected to.
+    /// References to all the [`JsonRpcClient`]s, where requests fail over to the next
+    /// client when the previous one fails.
+    pub fn endpoints(&self) -> &[JsonRpcClient] {
+        &self.rpc_endpoints
+    }
+
+    /// The most recently selected RPC endpoint. Under concurrent use, calls racing with
+    /// each other may change the selection.
+    pub fn current_endpoint(&self) -> &JsonRpcClient {
+        &self.rpc_endpoints[self.current_endpoint_index()]
+    }
+
+    /// Index of the most recently selected RPC endpoint. Under concurrent use, calls
+    /// racing with each other may change the selection.
+    pub fn current_endpoint_index(&self) -> usize {
+        self.current_endpoint_idx.load(Ordering::SeqCst)
+    }
+
+    /// The RPC address of the most recently selected endpoint. Under concurrent use, calls
+    /// racing with each other may change the selection.
     pub fn rpc_addr(&self) -> String {
-        self.rpc_client.server_addr().into()
+        self.current_endpoint().server_addr().into()
+    }
+
+    /// Call a JSON-RPC method with the network, retrying on retryable errors and
+    /// failing over to the next RPC endpoint when one keeps failing. Errors where
+    /// `is_critical` returns true abort the retrying immediately.
+    pub(crate) async fn call_with_retry<M, C>(
+        &self,
+        method: &M,
+        is_critical: C,
+    ) -> MethodCallResult<M::Response, M::Error>
+    where
+        M: methods::RpcMethod + Send + Sync,
+        M::Response: Send,
+        M::Error: Send,
+        C: Fn(&JsonRpcError<M::Error>) -> bool + Send + Sync,
+    {
+        let mut last_err = None;
+        let start = self.current_endpoint_index();
+        let endpoint_count = self.rpc_endpoints.len();
+        for offset in 0..endpoint_count {
+            let idx = (start + offset) % endpoint_count;
+            let client = &self.rpc_endpoints[idx];
+            // Record each failover so clones and subsequent calls start here.
+            if offset > 0 {
+                self.current_endpoint_idx.store(idx, Ordering::SeqCst);
+            }
+            let strategy = FixedInterval::new(RETRY_BACKOFF).take(RETRIES_PER_ENDPOINT - 1);
+            let retry = RetryIf::start(
+                strategy,
+                || client.call(method),
+                |err: &JsonRpcError<M::Error>| !is_critical(err),
+            );
+            match retry.await {
+                Ok(response) => {
+                    self.current_endpoint_idx.store(idx, Ordering::SeqCst);
+                    return Ok(response);
+                }
+                Err(e) if is_critical(&e) => return Err(e),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        // The index now points at the last endpoint attempted.
+        Err(last_err.expect("at least one endpoint is required"))
     }
 
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network.
@@ -129,11 +231,13 @@ impl Client {
         let signed_transaction = self.sign_tx(signer, receiver_id, actions).await?;
 
         let result = self
-            .rpc_client
-            .call(&methods::send_tx::RpcSendTransactionRequest {
-                signed_transaction,
-                wait_until,
-            })
+            .call_with_retry(
+                &methods::send_tx::RpcSendTransactionRequest {
+                    signed_transaction,
+                    wait_until,
+                },
+                is_critical_tx_error,
+            )
             .await;
 
         self.check_and_invalidate_cache(&cache_key, &result).await;
@@ -161,11 +265,13 @@ impl Client {
         let tx_hash = signed_transaction.get_hash();
 
         let result = self
-            .rpc_client
-            .call(&methods::send_tx::RpcSendTransactionRequest {
-                signed_transaction,
-                wait_until: TxExecutionStatus::None,
-            })
+            .call_with_retry(
+                &methods::send_tx::RpcSendTransactionRequest {
+                    signed_transaction,
+                    wait_until: TxExecutionStatus::None,
+                },
+                is_critical_tx_error,
+            )
             .await;
 
         if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(_err))) = &result {
@@ -177,14 +283,15 @@ impl Client {
         Ok(tx_hash)
     }
 
-    /// Send a JsonRpc method to the network.
+    /// Send a JsonRpc method to the network, retrying on any error since all callers
+    /// use read-only, idempotent queries.
     pub(crate) async fn send_query<M>(&self, method: &M) -> MethodCallResult<M::Response, M::Error>
     where
         M: methods::RpcMethod + Send + Sync,
         M::Response: Send,
         M::Error: Send,
     {
-        self.rpc_client.call(method).await
+        self.call_with_retry(method, |_| false).await
     }
 
     /// Fetches the nonce associated to the account id and public key, which essentially is the
@@ -205,15 +312,18 @@ impl Client {
         public_key: &PublicKey,
     ) -> Result<(AccessKeyView, CryptoHash, BlockHeight)> {
         let resp = self
-            .rpc_client
-            .call(&RpcQueryRequest {
-                // Finality::None => Optimistic query for access key
-                block_reference: Finality::None.into(),
-                request: QueryRequest::ViewAccessKey {
-                    account_id: account_id.clone(),
-                    public_key: public_key.clone(),
+            .call_with_retry(
+                &RpcQueryRequest {
+                    // Finality::Final is used to avoid transaction expiration when the RPC
+                    // nodes are at different chain heights, e.g. on load-balanced endpoints.
+                    block_reference: Finality::Final.into(),
+                    request: QueryRequest::ViewAccessKey {
+                        account_id: account_id.clone(),
+                        public_key: public_key.clone(),
+                    },
                 },
-            })
+                is_critical_query_error,
+            )
             .await?;
 
         match resp.kind {
@@ -272,14 +382,16 @@ impl Client {
         wait_until: TxExecutionStatus,
     ) -> Result<FinalExecutionOutcomeView, Error> {
         let response = self
-            .rpc_client
-            .call(methods::tx::RpcTransactionStatusRequest {
-                transaction_info: methods::tx::TransactionInfo::TransactionId {
-                    sender_account_id: sender_id.clone(),
-                    tx_hash,
+            .call_with_retry(
+                &methods::tx::RpcTransactionStatusRequest {
+                    transaction_info: methods::tx::TransactionInfo::TransactionId {
+                        sender_account_id: sender_id.clone(),
+                        tx_hash,
+                    },
+                    wait_until,
                 },
-                wait_until,
-            })
+                is_critical_status_error,
+            )
             .await
             .map_err(Error::from)?;
 
@@ -302,8 +414,96 @@ impl Client {
 
 impl From<Client> for JsonRpcClient {
     fn from(client: Client) -> Self {
-        client.rpc_client
+        let idx = client.current_endpoint_index() % client.rpc_endpoints.len();
+        client
+            .rpc_endpoints
+            .into_iter()
+            .nth(idx)
+            .expect("at least one RPC client is required")
     }
+}
+
+/// Retryable transport or server-level errors, such as a node being down or timing
+/// out. Errors from the method handler itself are considered critical and are not
+/// retried.
+fn is_retryable_error<E>(err: &JsonRpcError<E>) -> bool {
+    match err {
+        JsonRpcError::TransportError(_) => true,
+        JsonRpcError::ServerError(JsonRpcServerError::InternalError { .. }) => true,
+        JsonRpcError::ServerError(JsonRpcServerError::ResponseStatusError(status)) => {
+            matches!(
+                status,
+                JsonRpcServerResponseStatusError::TooManyRequests
+                    | JsonRpcServerResponseStatusError::TimeoutError
+                    | JsonRpcServerResponseStatusError::ServiceUnavailable
+            ) || matches!(
+                status,
+                JsonRpcServerResponseStatusError::Unexpected { status }
+                    if status.is_server_error()
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Classifies errors from sending transactions. Everything invalid about the
+/// transaction itself is critical, e.g. an invalid nonce, since retrying would
+/// just fail again. Handler errors that merely reflect a node's view of the
+/// network (timeouts, routing, shard ownership, internal node errors) are not
+/// critical and should be retried on another endpoint.
+fn is_critical_tx_error(err: &JsonRpcError<RpcTransactionError>) -> bool {
+    if is_retryable_error(err) {
+        return false;
+    }
+    !matches!(
+        err,
+        JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+            RpcTransactionError::TimeoutError(_)
+                | RpcTransactionError::RequestRouted { .. }
+                | RpcTransactionError::DoesNotTrackShard
+                | RpcTransactionError::UnknownTransaction { .. }
+                | RpcTransactionError::InternalError { .. }
+        ))
+    )
+}
+
+/// Classifies errors from fetching a transaction's status. Along with retryable
+/// network errors, node-specific handler errors (timeouts, unknown transactions,
+/// untracked shards, routing, and internal node errors) are retried, e.g. when
+/// the transaction was routed to another node.
+fn is_critical_status_error(err: &JsonRpcError<RpcTransactionError>) -> bool {
+    if is_retryable_error(err) {
+        return false;
+    }
+    !matches!(
+        err,
+        JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+            RpcTransactionError::TimeoutError(_)
+                | RpcTransactionError::UnknownTransaction { .. }
+                | RpcTransactionError::DoesNotTrackShard
+                | RpcTransactionError::RequestRouted { .. }
+                | RpcTransactionError::InternalError { .. }
+        ))
+    )
+}
+
+/// Classifies errors from read-only queries. Node-specific handler errors are not
+/// critical: an endpoint that is still syncing or lacks the requested data can be
+/// retried on another endpoint. Malformed requests remain critical.
+fn is_critical_query_error(err: &JsonRpcError<RpcQueryError>) -> bool {
+    if is_retryable_error(err) {
+        return false;
+    }
+    !matches!(
+        err,
+        JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+            RpcQueryError::NoSyncedBlocks
+                | RpcQueryError::UnavailableShard { .. }
+                | RpcQueryError::GarbageCollectedBlock { .. }
+                | RpcQueryError::UnknownBlock { .. }
+                | RpcQueryError::InternalError { .. }
+        ))
+    )
 }
 
 async fn fetch_tx_errs(result: &RpcTransactionResponse) -> Vec<&TxExecutionError> {
@@ -338,8 +538,9 @@ async fn cached_nonce(
 ) -> Result<(Nonce, CryptoHash, BlockHeight)> {
     let nonce = nonce.fetch_add(1, Ordering::SeqCst);
 
-    // Fetch latest block_hash since the previous one is now invalid for new transactions:
-    let block = client.view_block().await?;
+    // Fetch the latest finalized block_hash since the previous one is now invalid
+    // for new transactions, and to avoid expiration on load-balanced RPC endpoints.
+    let block = client.view_block().finality(Finality::Final).await?;
     Ok((nonce + 1, block.header.hash, block.header.height))
 }
 
@@ -372,5 +573,69 @@ async fn fetch_nonce(
                 Ok((access_key.nonce + 1, block_hash, block_height))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::Server;
+    use near_jsonrpc_client::methods::health::RpcHealthRequest;
+
+    fn jsonrpc_client(addr: &str) -> JsonRpcClient {
+        JsonRpcClient::new_client().connect(addr)
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_fails_over_to_healthy_endpoint() {
+        let mut failing = Server::new_async().await;
+        let mut healthy = Server::new_async().await;
+
+        // Every attempt against the first endpoint returns a retryable HTTP 408.
+        let failing_mock = failing
+            .mock("POST", "/")
+            .with_status(408)
+            .expect(RETRIES_PER_ENDPOINT)
+            .create_async()
+            .await;
+        let healthy_mock = healthy
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":null,"id":1}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = Client::from_clients(vec![
+            jsonrpc_client(&failing.url()),
+            jsonrpc_client(&healthy.url()),
+        ]);
+
+        // Any error is retryable for this read-only query, so the failing endpoint
+        // is retried RETRIES_PER_ENDPOINT times before failing over.
+        let response = client.send_query(&RpcHealthRequest).await;
+        assert!(response.is_ok(), "unexpected error: {response:?}");
+        assert_eq!(client.current_endpoint_index(), 1);
+        failing_mock.assert_async().await;
+        healthy_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn critical_error_short_circuits_without_failover() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(400)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = Client::from_client(jsonrpc_client(&server.url()));
+        let result = client.call_with_retry(&RpcHealthRequest, |_| true).await;
+
+        assert!(result.is_err());
+        assert_eq!(client.current_endpoint_index(), 0);
+        mock.assert_async().await;
     }
 }

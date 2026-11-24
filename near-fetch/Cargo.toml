@@ -34,3 +34,6 @@ any = ["near-jsonrpc-client/any"]
 sandbox = ["near-jsonrpc-client/sandbox"]
 native-tls = ["near-jsonrpc-client/native-tls"]
 rustls-tls = ["near-jsonrpc-client/rustls-tls"]
+
+[dev-dependencies]
+mockito = { version = "1.7", default-features = false }
