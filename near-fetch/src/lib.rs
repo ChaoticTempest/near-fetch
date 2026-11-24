@@ -842,4 +842,90 @@ mod tests {
         assert!(!is_critical_tx_error(&err));
         assert!(!is_critical_status_error(&err));
     }
+
+    // Endpoint setup and the shared selection index are exercised through real
+    // mock-server failover, not by comparing two views of the same index.
+
+    async fn healthy_mock(server: &mut Server) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":null,"id":1}"#)
+            .expect(1)
+            .create_async()
+            .await
+    }
+
+    async fn timeout_mock(server: &mut Server) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .with_status(408)
+            .expect(RETRIES_PER_ENDPOINT)
+            .create_async()
+            .await
+    }
+
+    #[tokio::test]
+    async fn from_clients_fails_over_to_second_endpoint() {
+        let mut first = Server::new_async().await;
+        let mut second = Server::new_async().await;
+        let failing = timeout_mock(&mut first).await;
+        let healthy = healthy_mock(&mut second).await;
+
+        let client = Client::from_clients(vec![
+            jsonrpc_client(&first.url()),
+            jsonrpc_client(&second.url()),
+        ]);
+        // Clone before failover: the selection index is shared across clones.
+        let clone = client.clone();
+
+        assert_eq!(client.current_endpoint_index(), 0);
+        assert_eq!(client.endpoints().len(), 2);
+        assert_eq!(client.rpc_addr(), first.url());
+        assert!(std::ptr::eq(client.inner(), &client.endpoints()[0]));
+
+        let response = client.send_query(&RpcHealthRequest).await;
+        assert!(response.is_ok(), "unexpected error: {response:?}");
+
+        assert_eq!(client.current_endpoint_index(), 1);
+        assert!(std::ptr::eq(client.inner(), &client.endpoints()[1]));
+        assert_eq!(client.rpc_addr(), second.url());
+        assert_eq!(clone.current_endpoint_index(), 1);
+        assert!(std::ptr::eq(clone.inner(), &clone.endpoints()[1]));
+        failing.assert_async().await;
+        healthy.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn new_with_endpoints_fails_over_to_last_endpoint() {
+        let mut first = Server::new_async().await;
+        let mut second = Server::new_async().await;
+        let mut third = Server::new_async().await;
+        let failing_first = timeout_mock(&mut first).await;
+        let failing_second = timeout_mock(&mut second).await;
+        let healthy = healthy_mock(&mut third).await;
+
+        let client = Client::new_with_endpoints(&[
+            first.url().as_str(),
+            second.url().as_str(),
+            third.url().as_str(),
+        ]);
+        let clone = client.clone();
+
+        assert_eq!(client.current_endpoint_index(), 0);
+        assert_eq!(client.endpoints().len(), 3);
+        assert_eq!(client.rpc_addr(), first.url());
+
+        let response = client.send_query(&RpcHealthRequest).await;
+        assert!(response.is_ok(), "unexpected error: {response:?}");
+
+        assert_eq!(client.current_endpoint_index(), 2);
+        assert!(std::ptr::eq(client.inner(), &client.endpoints()[2]));
+        assert_eq!(client.rpc_addr(), third.url());
+        assert_eq!(clone.current_endpoint_index(), 2);
+        failing_first.assert_async().await;
+        failing_second.assert_async().await;
+        healthy.assert_async().await;
+    }
 }

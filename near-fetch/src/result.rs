@@ -84,7 +84,7 @@ impl ExecutionDetails {
 }
 
 /// The result after evaluating the status of an execution. This can be [`ExecutionSuccess`]
-/// for successful executions or a [`ExecutionFailure`] for failed ones.
+/// for successful executions or an [`Error::TxExecution`] for failed ones.
 #[derive(PartialEq, Eq, Debug, Clone)]
 #[non_exhaustive]
 pub struct ExecutionResult<T> {
@@ -100,7 +100,7 @@ pub struct ExecutionResult<T> {
 }
 
 /// Execution related info found after performing a transaction. Can be converted
-/// into [`ExecutionSuccess`] or [`ExecutionFailure`] through [`into_result`]
+/// into [`ExecutionSuccess`] or an [`Error::TxExecution`] through [`into_result`]
 ///
 /// [`into_result`]: crate::result::ExecutionFinalResult::into_result
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -122,7 +122,7 @@ impl ExecutionFinalResult {
         }
     }
 
-    /// Converts this object into a [`Result`] holding either [`ExecutionSuccess`] or [`ExecutionFailure`].
+    /// Converts this object into a [`Result`] holding either [`ExecutionSuccess`] or an [`Error::TxExecution`].
     pub fn into_result(self) -> Result<ExecutionSuccess> {
         let total_gas_burnt = self.total_gas_burnt();
         match self.status {
@@ -306,7 +306,7 @@ impl<T> ExecutionResult<T> {
     }
 }
 
-/// Value type returned from an [`ExecutionOutcome`] or receipt result. This value
+/// Value type returned from an [`ExecutionOutcomeWithIdView`] or receipt result. This value
 /// can be converted into the underlying Rust datatype, or directly grab the raw
 /// bytes associated to the value.
 #[derive(Debug)]

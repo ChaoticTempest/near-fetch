@@ -226,8 +226,8 @@ impl FunctionCallTransaction<'_> {
     }
 
     /// Send the transaction to the network to be processed. This will be done asynchronously
-    /// without waiting for the transaction to complete. This returns us a [`TransactionStatus`]
-    /// for which we can call into [`status`] and/or `.await` to retrieve info about whether
+    /// without waiting for the transaction to complete. This returns us an [`AsyncTransactionStatus`]
+    /// for which we can call into [`AsyncTransactionStatus::status`] and/or `.await` to retrieve info about whether
     /// the transaction has been completed or not. Note that `.await` will wait till completion
     /// of the transaction.
     pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
@@ -606,7 +606,7 @@ impl AsyncTransactionStatus {
         }
     }
 
-    /// Query the status of the transaction. This will return a [`TransactionStatus`]
+    /// Query the status of the transaction. This will return an [`AsyncTransactionStatus`]
     /// object that we can use to query into the status of the transaction.
     pub async fn status(&self) -> Result<Poll<ExecutionFinalResult>> {
         let result = self
