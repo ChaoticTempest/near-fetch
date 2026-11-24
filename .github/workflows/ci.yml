@@ -38,3 +38,75 @@ jobs:
       - uses: extractions/setup-just@v4
       - uses: Swatinem/rust-cache@v2
       - run: just features
+
+  release-bump:
+    if: "github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'release: ')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - name: Check out the release PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Extract expected version from PR title
+        run: |
+          set -euo pipefail
+          if [[ ! "$PR_TITLE" =~ ^release:\ ([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$ ]]; then
+            echo "::error::Malformed release PR title '$PR_TITLE'. Expected exactly: release: X.Y.Z (optionally followed by ' (#N)')"
+            exit 1
+          fi
+          EXPECTED="${BASH_REMATCH[1]}"
+          echo "EXPECTED=$EXPECTED" >> "$GITHUB_ENV"
+          echo "Expected version: $EXPECTED"
+
+      - name: Read base version from Cargo.toml
+        run: |
+          set -euo pipefail
+          BASE="$(python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          text = subprocess.check_output(
+              ["git", "show", f'{os.environ["BASE_SHA"]}:near-fetch/Cargo.toml'],
+              text=True,
+          )
+          try:
+              import tomllib
+          except ImportError:  # Python < 3.11
+              tomllib = None
+          if tomllib is not None:
+              version = tomllib.loads(text)["package"]["version"]
+          else:
+              section = text.split("[package]", 1)[1].split("\n[", 1)[0]
+              match = re.search(r'^version\s*=\s*"([^"]+)"', section, re.M)
+              if not match:
+                  raise SystemExit("error: could not read [package] version from base Cargo.toml")
+              version = match.group(1)
+          print(version)
+          PY
+          )"
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+          echo "Base version: $BASE"
+
+      - name: Require an unused version tag
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$EXPECTED" >/dev/null; then
+            echo "::error::Tag '$EXPECTED' already exists; release PRs must use a new version."
+            exit 1
+          fi
+          echo "No existing tag for $EXPECTED"
+
+      - name: Verify the Cargo version was bumped
+        run: just release-check "$EXPECTED" "$BASE"
