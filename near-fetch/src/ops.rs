@@ -1,6 +1,7 @@
 //! All operation types that are generated/used when commiting transactions to the network.
 
 use std::fmt;
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -38,12 +39,35 @@ pub const DEFAULT_CALL_FN_GAS: Gas = Gas::from_teragas(10);
 /// will require 1 yoctoNEAR to be deposited in order to perform a function.
 pub const DEFAULT_CALL_DEPOSIT: NearToken = NearToken::from_near(0);
 
+/// Deferred form of the two serialization errors a [`Function`]'s args can hold.
+///
+/// [`Error`] is not cloneable, so the source error is kept behind an [`Arc`] and
+/// converted back into the original variant when the args are consumed. Only the
+/// message survives the round trip: the reconstructed error is equivalent in
+/// variant and message, but is not the original error value.
+#[derive(Debug, Clone)]
+pub(crate) enum DeferredArgsError {
+    Serialization(Arc<serde_json::Error>),
+    Io(Arc<std::io::Error>),
+}
+
+impl From<DeferredArgsError> for Error {
+    fn from(err: DeferredArgsError) -> Self {
+        match err {
+            DeferredArgsError::Serialization(err) => Error::Serialization(
+                <serde_json::Error as serde::de::Error>::custom(err.to_string()),
+            ),
+            DeferredArgsError::Io(err) => Error::Io(std::io::Error::other(err.to_string())),
+        }
+    }
+}
+
 /// A set of arguments we can provide to a transaction, containing
 /// the function name, arguments, the amount of gas to use and deposit.
 #[derive(Debug)]
 pub struct Function {
     pub(crate) name: String,
-    pub(crate) args: Result<Vec<u8>>,
+    pub(crate) args: Result<Vec<u8>, DeferredArgsError>,
     pub(crate) deposit: NearToken,
     pub(crate) gas: Gas,
 }
@@ -52,13 +76,7 @@ impl Clone for Function {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
-            // `Error` is not cloneable, so a deferred args error is re-created
-            // with its message preserved.
-            args: self
-                .args
-                .as_ref()
-                .cloned()
-                .map_err(|err| Error::RpcReturnedInvalidData(err.to_string())),
+            args: self.args.clone(),
             deposit: self.deposit,
             gas: self.gas,
         }
@@ -94,7 +112,7 @@ impl Function {
     pub fn args_json<U: serde::Serialize>(mut self, args: U) -> Self {
         match serde_json::to_vec(&args) {
             Ok(args) => self.args = Ok(args),
-            Err(e) => self.args = Err(Error::Serialization(e)),
+            Err(e) => self.args = Err(DeferredArgsError::Serialization(Arc::new(e))),
         }
         self
     }
@@ -104,7 +122,7 @@ impl Function {
     pub fn args_borsh<U: borsh::BorshSerialize>(mut self, args: U) -> Self {
         match borsh::to_vec(&args) {
             Ok(args) => self.args = Ok(args),
-            Err(e) => self.args = Err(Error::Io(e)),
+            Err(e) => self.args = Err(DeferredArgsError::Io(Arc::new(e))),
         }
         self
     }
@@ -335,7 +353,7 @@ impl Transaction<'_> {
         let args = match function.args {
             Ok(args) => args,
             Err(err) => {
-                self.actions = Err(err);
+                self.actions = Err(err.into());
                 return self;
             }
         };
@@ -530,6 +548,40 @@ impl Client {
     /// the batched transaction to the network.
     pub fn batch<'a>(&self, signer: &'a dyn SignerExt, receiver_id: &AccountId) -> Transaction<'a> {
         Transaction::new(self, signer, receiver_id.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn function_clone_preserves_args() {
+        let function = Function::new("hello").args(b"world".to_vec());
+        assert_eq!(function.clone().args.unwrap(), b"world");
+    }
+
+    #[test]
+    fn function_clone_preserves_deferred_args_error_variant() {
+        let original = serde_json::from_str::<u8>("not a number").unwrap_err();
+        let message = original.to_string();
+        let function = Function {
+            name: "hello".into(),
+            args: Err(DeferredArgsError::Serialization(Arc::new(original))),
+            deposit: DEFAULT_CALL_DEPOSIT,
+            gas: DEFAULT_CALL_FN_GAS,
+        };
+
+        let cloned = function.clone();
+        let deferred = cloned.args.unwrap_err();
+        assert!(matches!(deferred, DeferredArgsError::Serialization(_)));
+
+        let err: Error = deferred.into();
+        assert!(
+            matches!(err, Error::Serialization(_)),
+            "unexpected error variant: {err:?}"
+        );
+        assert_eq!(err.to_string(), message);
     }
 }
 
