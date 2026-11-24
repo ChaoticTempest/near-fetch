@@ -20,8 +20,10 @@ cargo llvm-cov --package near-fetch --all-targets --summary-only --fail-under-li
 ```
 
 `cargo doc -p near-fetch --no-deps` must emit zero warnings. CI runs three
-parallel jobs on pull requests and pushes to `main`: `quality` (`just ci`),
-`msrv` (Rust 1.95: `just check`, `just test`), and `features` (`just features`).
+always-on parallel jobs on pull requests and pushes to `main`: `quality`
+(`just ci`), `msrv` (Rust 1.95: `just check`, `just test`), and `features`
+(`just features`), plus a conditional `release-bump` job on release PRs (titles
+starting with `release: `).
 
 ## Testing
 

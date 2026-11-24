@@ -25,6 +25,51 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95
       - uses: extractions/setup-just@v4
       - uses: Swatinem/rust-cache@v2
+      - name: Verify MSRV-compatible dependency resolution
+        run: |
+          set -euo pipefail
+          # Cargo.lock is intentionally gitignored, so resolution could silently
+          # drift to dependencies requiring a newer compiler. Resolve a fresh
+          # lockfile with Rust 1.95's incompatible-rust-versions fallback so
+          # version selection itself prefers MSRV-compatible releases.
+          export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback
+          cargo +1.95 generate-lockfile
+          cargo +1.95 metadata --format-version 1 > "$RUNNER_TEMP/msrv-metadata.json"
+          python3 - <<'PY'
+          import json
+          import os
+
+          MSRV = (1, 95, 0)
+
+          def parse(version):
+              parts = []
+              for component in version.split(".")[:3]:
+                  digits = ""
+                  for character in component:
+                      if not character.isdigit():
+                          break
+                      digits += character
+                  parts.append(int(digits) if digits else 0)
+              while len(parts) < 3:
+                  parts.append(0)
+              return tuple(parts)
+
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "msrv-metadata.json")) as f:
+              metadata = json.load(f)
+          offending = [
+              f"{pkg['name']} {pkg['version']} (rust_version {pkg['rust_version']})"
+              for pkg in metadata["packages"]
+              if pkg.get("rust_version") and parse(pkg["rust_version"]) > MSRV
+          ]
+          if offending:
+              print("::error::Resolved dependencies require a Rust version newer than 1.95:")
+              for item in offending:
+                  print(f"::error::  {item}")
+              raise SystemExit(1)
+          print("All resolved dependencies are compatible with Rust 1.95.")
+          PY
+          # Prove the freshly generated lockfile is usable with the MSRV toolchain.
+          cargo +1.95 check --locked -p near-fetch
       - run: just check
       - run: just test
 
