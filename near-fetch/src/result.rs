@@ -91,8 +91,9 @@ pub struct ExecutionResult<T> {
     /// Total gas burnt by the execution
     pub total_gas_burnt: Gas,
 
-    /// Value returned from an execution. This is a base64 encoded str for a successful
-    /// execution or a `TxExecutionError` if a failed one.
+    /// Value returned from a successful execution, base64-encoded as a [`Value`].
+    /// Failed executions are reported as [`Error::TxExecution`] by
+    /// [`ExecutionFinalResult::into_result`] and are never stored here.
     pub value: T,
 
     /// Additional details related to the execution.

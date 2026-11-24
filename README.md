@@ -132,9 +132,9 @@ fn main() {
 
 - **Retries with backoff** — transactions can be retried with a custom strategy
   or jittered exponential backoff via `retry` / `retry_exponential`.
-- **Multi-endpoint failover** — requests fan out across configured RPC
-  endpoints, retrying node-specific status timeouts and transport errors before
-  moving on.
+- **Multi-endpoint failover** — requests retry on the current RPC endpoint for
+  node-specific status timeouts and transport errors, then move to the next
+  configured endpoint in order.
 - **Nonce caching** — access-key nonces are cached locally and invalidated when
   the network reports a stale nonce, avoiding a lookup before every transaction.
 - **Query builders** — `map` and `and_then` transform or chain query results

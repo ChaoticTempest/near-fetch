@@ -1,7 +1,11 @@
-//! This module defines a bunch of internal types used solely for querying into RPC
-//! methods to retrieve info about what's on the chain. Note that the types defined
-//! are exposed as-is for users to reference in their own functions or structs as
-//! needed. These types cannot be created outside of near_fetch.
+//! This module defines the types used for querying RPC methods to retrieve
+//! information about on-chain state. These types are exposed so users can
+//! reference them in their own functions or structs as needed.
+//!
+//! The query builders are created through [`Client`] methods; their constructors
+//! are crate-private. [`ViewResult`] and [`ProcessQuery`], however, are part of
+//! the public API: `ViewResult` has public fields and `ProcessQuery` can be
+//! implemented by external crates.
 
 use std::fmt::{Debug, Display};
 
