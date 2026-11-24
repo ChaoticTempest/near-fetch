@@ -1333,6 +1333,23 @@ mod tests {
         healthy_mock.assert_async().await;
     }
 
+    #[tokio::test]
+    async fn zero_retries_makes_exactly_one_attempt() {
+        let mut server = Server::new_async().await;
+        let mock = timeout_mock_with_attempts(&mut server, 1).await;
+        let client = Client::builder()
+            .retry_backoff(Duration::ZERO)
+            .retries_per_endpoint(0)
+            .endpoint(&server.url())
+            .build();
+
+        // Zero retries means only the initial attempt; no failover to another
+        // endpoint is possible with a single configured endpoint.
+        assert!(client.send_query(&RpcHealthRequest).await.is_err());
+        assert_eq!(client.current_endpoint_index(), 0);
+        mock.assert_async().await;
+    }
+
     #[test]
     #[should_panic(expected = "at least one RPC endpoint is required")]
     fn builder_requires_an_endpoint() {
