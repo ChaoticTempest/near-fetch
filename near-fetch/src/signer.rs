@@ -3,8 +3,74 @@ use std::sync::Arc;
 
 use near_account_id::AccountId;
 use near_crypto::{vrf, InMemorySigner, PublicKey, SecretKey, Signature, Signer};
+use near_primitives::borsh;
+use near_primitives::hash::CryptoHash;
+use near_primitives::views::AccessKeyPermissionView;
 
 use crate::error::{Error, Result};
+use crate::Client;
+
+/// An off-chain message to sign, as defined by
+/// [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md). Widely used for
+/// authentication and proof of account ownership.
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+)]
+pub struct OffchainMessage {
+    /// The message that is being transmitted.
+    pub message: String,
+    /// A nonce that uniquely identifies this instance of the message, denoted as a 32 bytes array.
+    pub nonce: [u8; 32],
+    /// The recipient to whom the message is destined (e.g. "alice.near" or "myapp.com").
+    pub recipient: String,
+    /// A callback URL that will be called with the signed message as a query parameter.
+    pub callback_url: Option<String>,
+}
+
+impl OffchainMessage {
+    const MESSAGE_PREFIX: u32 = (1u32 << 31) + 413;
+
+    /// Compute the NEP-413 hash for this message.
+    ///
+    /// This is infallible: serializing this type into a `Vec` only writes its
+    /// `String`, `[u8; 32]`, `String`, and `Option<String>` fields, none of which
+    /// can fail to serialize into a growable buffer.
+    pub fn compute_hash(&self) -> CryptoHash {
+        let mut bytes = Self::MESSAGE_PREFIX.to_le_bytes().to_vec();
+        bytes.extend(borsh::to_vec(self).expect("NEP-413 message serialization is infallible"));
+        CryptoHash::hash_bytes(&bytes)
+    }
+
+    /// Extract timestamp from the nonce (first 8 bytes as big-endian u64 milliseconds).
+    pub fn extract_timestamp_from_nonce(&self) -> u64 {
+        let mut timestamp = [0u8; 8];
+        timestamp.copy_from_slice(&self.nonce[..8]);
+        u64::from_be_bytes(timestamp)
+    }
+
+    /// Verify a signature over this message, and that the public key belongs to the
+    /// account as a full access key, as required by NEP-413.
+    pub async fn verify(
+        &self,
+        account_id: &AccountId,
+        public_key: PublicKey,
+        signature: &Signature,
+        client: &Client,
+    ) -> Result<bool> {
+        let hash = self.compute_hash();
+        if !signature.verify(hash.as_ref(), &public_key) {
+            return Ok(false);
+        }
+
+        let (access_key, _, _) = client.access_key(account_id, &public_key).await?;
+        Ok(access_key.permission == AccessKeyPermissionView::FullAccess)
+    }
+}
 
 /// A key rotating in memory signer, that will rotate the key used for signing on
 /// each call to [`Signer::sign`].
@@ -95,6 +161,15 @@ impl ExposeAccountId for KeyRotatingSigner {
 pub trait SignerExt: ExposeAccountId + Send + Sync {
     fn sign(&self, data: &[u8]) -> Signature;
     fn public_key(&self) -> PublicKey;
+
+    /// Signs an [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md) off-chain
+    /// message, widely used for authentication and proof of account ownership. This is
+    /// the same as signing the message's hash: computing the hash is infallible, but
+    /// signing itself may panic (for example, [`Signer::Empty`]).
+    fn sign_offchain(&self, message: &OffchainMessage) -> Signature {
+        let hash = message.compute_hash();
+        self.sign(hash.as_ref())
+    }
 }
 
 impl SignerExt for InMemorySigner {

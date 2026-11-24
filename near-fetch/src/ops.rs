@@ -481,7 +481,7 @@ impl<'a> std::future::IntoFuture for RetryableTransaction<'a> {
             };
 
             if let Some(strategy) = self.strategy {
-                Retry::spawn(strategy, action).await
+                Retry::start(strategy, action).await
             } else {
                 action().await
             }
