@@ -36,10 +36,14 @@ impl OffchainMessage {
     const MESSAGE_PREFIX: u32 = (1u32 << 31) + 413;
 
     /// Compute the NEP-413 hash for this message.
-    pub fn compute_hash(&self) -> Result<CryptoHash> {
+    ///
+    /// This is infallible: serializing this type into a `Vec` only writes its
+    /// `String`, `[u8; 32]`, `String`, and `Option<String>` fields, none of which
+    /// can fail to serialize into a growable buffer.
+    pub fn compute_hash(&self) -> CryptoHash {
         let mut bytes = Self::MESSAGE_PREFIX.to_le_bytes().to_vec();
-        borsh::to_writer(&mut bytes, self)?;
-        Ok(CryptoHash::hash_bytes(&bytes))
+        bytes.extend(borsh::to_vec(self).expect("NEP-413 message serialization is infallible"));
+        CryptoHash::hash_bytes(&bytes)
     }
 
     /// Extract timestamp from the nonce (first 8 bytes as big-endian u64 milliseconds).
@@ -58,7 +62,7 @@ impl OffchainMessage {
         signature: &Signature,
         client: &Client,
     ) -> Result<bool> {
-        let hash = self.compute_hash()?;
+        let hash = self.compute_hash();
         if !signature.verify(hash.as_ref(), &public_key) {
             return Ok(false);
         }
@@ -162,9 +166,7 @@ pub trait SignerExt: ExposeAccountId + Send + Sync {
     /// message, widely used for authentication and proof of account ownership. This is
     /// the same as signing the message's hash, and so is infallible.
     fn sign_offchain(&self, message: &OffchainMessage) -> Signature {
-        let hash = message
-            .compute_hash()
-            .expect("NEP-413 message serialization is infallible");
+        let hash = message.compute_hash();
         self.sign(hash.as_ref())
     }
 }
