@@ -1,7 +1,8 @@
 [package]
 name = "near-fetch"
 version = "0.12.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 readme = "../README.md"
 repository = "https://github.com/ChaoticTempest/fetch"

@@ -1,14 +1,14 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use near_account_id::AccountId;
-use near_crypto::{vrf, InMemorySigner, PublicKey, SecretKey, Signature, Signer};
+use near_crypto::{InMemorySigner, PublicKey, SecretKey, Signature, Signer, vrf};
 use near_primitives::borsh;
 use near_primitives::hash::CryptoHash;
 use near_primitives::views::AccessKeyPermissionView;
 
-use crate::error::{Error, Result};
 use crate::Client;
+use crate::error::{Error, Result};
 
 /// An off-chain message to sign, as defined by
 /// [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md). Widely used for

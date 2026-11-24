@@ -19,8 +19,8 @@ use near_primitives::transaction::{
 use near_primitives::types::Gas;
 use near_primitives::views::{FinalExecutionOutcomeView, TxExecutionStatus};
 use near_token::NearToken;
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use crate::query::BoxFuture;
 use crate::result::ExecutionFinalResult;
