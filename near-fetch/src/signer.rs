@@ -231,7 +231,7 @@ mod tests {
             callback_url: Some("myapp.com/callback".into()),
         };
 
-        let hash = payload.compute_hash().unwrap();
+        let hash = payload.compute_hash();
         let expected =
             hex_to_hash("c9ce5de288f7de6d83e2303e56c7615949da83867ea33c0747ed45c47ef50148");
         assert_eq!(hash, expected);
@@ -245,7 +245,7 @@ mod tests {
             recipient: "myapp.com".into(),
             callback_url: None,
         };
-        let hash = payload.compute_hash().unwrap();
+        let hash = payload.compute_hash();
         let expected =
             hex_to_hash("58909135e0c2d203cce3f7f0ff53d44ee2851fffe37c9d1f569ebcc83f2d5c4c");
         assert_eq!(hash, expected);
