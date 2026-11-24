@@ -843,45 +843,89 @@ mod tests {
         assert!(!is_critical_status_error(&err));
     }
 
-    // These tests cover locally observable endpoint setup and initial selection.
-    // Failover behavior itself is exercised above with mock HTTP servers in
-    // `call_with_retry_fails_over_to_healthy_endpoint`.
+    // Endpoint setup and the shared selection index are exercised through real
+    // mock-server failover, not by comparing two views of the same index.
 
-    fn dummy_client(addr: &str) -> JsonRpcClient {
-        JsonRpcClient::new_client().connect(addr)
+    async fn healthy_mock(server: &mut Server) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":null,"id":1}"#)
+            .expect(1)
+            .create_async()
+            .await
     }
 
-    #[test]
-    fn from_clients_starts_at_first_endpoint() {
-        let first = dummy_client("http://127.0.0.1:1");
-        let second = dummy_client("http://127.0.0.1:2");
-        let client = Client::from_clients(vec![first, second]);
+    async fn timeout_mock(server: &mut Server) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .with_status(408)
+            .expect(RETRIES_PER_ENDPOINT)
+            .create_async()
+            .await
+    }
+
+    #[tokio::test]
+    async fn from_clients_fails_over_to_second_endpoint() {
+        let mut first = Server::new_async().await;
+        let mut second = Server::new_async().await;
+        let failing = timeout_mock(&mut first).await;
+        let healthy = healthy_mock(&mut second).await;
+
+        let client = Client::from_clients(vec![
+            jsonrpc_client(&first.url()),
+            jsonrpc_client(&second.url()),
+        ]);
+        // Clone before failover: the selection index is shared across clones.
+        let clone = client.clone();
 
         assert_eq!(client.current_endpoint_index(), 0);
         assert_eq!(client.endpoints().len(), 2);
-        assert_eq!(client.rpc_addr(), "http://127.0.0.1:1");
-        assert!(std::ptr::eq(client.inner(), client.current_endpoint()));
-        assert_eq!(client.endpoints()[0].server_addr(), "http://127.0.0.1:1");
-        assert_eq!(client.endpoints()[1].server_addr(), "http://127.0.0.1:2");
+        assert_eq!(client.rpc_addr(), first.url());
+        assert!(std::ptr::eq(client.inner(), &client.endpoints()[0]));
+
+        let response = client.send_query(&RpcHealthRequest).await;
+        assert!(response.is_ok(), "unexpected error: {response:?}");
+
+        assert_eq!(client.current_endpoint_index(), 1);
+        assert!(std::ptr::eq(client.inner(), &client.endpoints()[1]));
+        assert_eq!(client.rpc_addr(), second.url());
+        assert_eq!(clone.current_endpoint_index(), 1);
+        assert!(std::ptr::eq(clone.inner(), &clone.endpoints()[1]));
+        failing.assert_async().await;
+        healthy.assert_async().await;
     }
 
-    #[test]
-    fn new_with_endpoints_starts_at_first_endpoint() {
+    #[tokio::test]
+    async fn new_with_endpoints_fails_over_to_last_endpoint() {
+        let mut first = Server::new_async().await;
+        let mut second = Server::new_async().await;
+        let mut third = Server::new_async().await;
+        let failing_first = timeout_mock(&mut first).await;
+        let failing_second = timeout_mock(&mut second).await;
+        let healthy = healthy_mock(&mut third).await;
+
         let client = Client::new_with_endpoints(&[
-            "http://127.0.0.1:1",
-            "http://127.0.0.1:2",
-            "http://127.0.0.1:3",
+            first.url().as_str(),
+            second.url().as_str(),
+            third.url().as_str(),
         ]);
+        let clone = client.clone();
 
         assert_eq!(client.current_endpoint_index(), 0);
         assert_eq!(client.endpoints().len(), 3);
-        assert_eq!(client.rpc_addr(), "http://127.0.0.1:1");
-        assert_eq!(
-            client.inner().server_addr(),
-            client.current_endpoint().server_addr()
-        );
-        assert_eq!(client.endpoints()[0].server_addr(), "http://127.0.0.1:1");
-        assert_eq!(client.endpoints()[1].server_addr(), "http://127.0.0.1:2");
-        assert_eq!(client.endpoints()[2].server_addr(), "http://127.0.0.1:3");
+        assert_eq!(client.rpc_addr(), first.url());
+
+        let response = client.send_query(&RpcHealthRequest).await;
+        assert!(response.is_ok(), "unexpected error: {response:?}");
+
+        assert_eq!(client.current_endpoint_index(), 2);
+        assert!(std::ptr::eq(client.inner(), &client.endpoints()[2]));
+        assert_eq!(client.rpc_addr(), third.url());
+        assert_eq!(clone.current_endpoint_index(), 2);
+        failing_first.assert_async().await;
+        failing_second.assert_async().await;
+        healthy.assert_async().await;
     }
 }

@@ -668,7 +668,7 @@ impl Client {
     /// Views the [`AccessKey`] of the account specified by [`AccountId`] associated with
     /// the [`PublicKey`]
     ///
-    /// [`AccessKey`]: crate::types::AccessKey
+    /// [`AccessKey`]: near_primitives::account::AccessKey
     pub fn view_access_key(&self, id: &AccountId, pk: &PublicKey) -> Query<'_, ViewAccessKey> {
         Query::new(
             self,
@@ -682,7 +682,7 @@ impl Client {
     /// Views all the [`AccessKey`]s of the account specified by [`AccountId`]. This will
     /// return a list of [`AccessKey`]s along with the associated [`PublicKey`].
     ///
-    /// [`AccessKey`]: crate::types::AccessKey
+    /// [`AccessKey`]: near_primitives::account::AccessKey
     pub fn view_access_keys(&self, id: &AccountId) -> Query<'_, ViewAccessKeyList> {
         Query::new(
             self,
@@ -828,6 +828,20 @@ mod tests {
             }
         });
         assert_eq!(query.method.process_response(sample_response()).unwrap(), 6);
+
+        // The closure's own error branch must propagate, not just the inner query's error.
+        let rejected = Query::new(&client, FakeQuery::ok(-1)).and_then(|value| {
+            if value > 0 {
+                Ok(value * 3)
+            } else {
+                Err(Error::InvalidArgs("non-positive value"))
+            }
+        });
+        let err = rejected
+            .method
+            .process_response(sample_response())
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidArgs("non-positive value")));
 
         let failing = Query::new(
             &client,
