@@ -15,7 +15,7 @@ use near_jsonrpc_client::errors::{
 };
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
 use near_jsonrpc_client::{methods, JsonRpcClient, MethodCallResult};
-use near_jsonrpc_primitives::types::query::QueryResponseKind;
+use near_jsonrpc_primitives::types::query::{QueryResponseKind, RpcQueryError};
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::errors::{ActionError, ActionErrorKind, InvalidTxError, TxExecutionError};
 use near_primitives::hash::CryptoHash;
@@ -41,7 +41,8 @@ pub use crate::error::Error;
 /// Cache key for access key nonces.
 pub type CacheKey = (AccountId, PublicKey);
 
-/// Number of times to retry a call on each RPC endpoint before failing over.
+/// Total number of attempts per RPC endpoint before failing over, including the
+/// initial attempt (a value of 3 means 3 attempts, i.e. 2 retries).
 const RETRIES_PER_ENDPOINT: usize = 3;
 
 /// Time to wait between each retry attempt.
@@ -269,7 +270,7 @@ impl Client {
                     signed_transaction,
                     wait_until: TxExecutionStatus::None,
                 },
-                |err| !is_retryable_error(err),
+                is_critical_tx_error,
             )
             .await;
 
@@ -282,15 +283,15 @@ impl Client {
         Ok(tx_hash)
     }
 
-    /// Send a JsonRpc method to the network, retrying on retryable errors.
+    /// Send a JsonRpc method to the network, retrying on any error since all callers
+    /// use read-only, idempotent queries.
     pub(crate) async fn send_query<M>(&self, method: &M) -> MethodCallResult<M::Response, M::Error>
     where
         M: methods::RpcMethod + Send + Sync,
         M::Response: Send,
         M::Error: Send,
     {
-        self.call_with_retry(method, |err| !is_retryable_error(err))
-            .await
+        self.call_with_retry(method, |_| false).await
     }
 
     /// Fetches the nonce associated to the account id and public key, which essentially is the
@@ -321,7 +322,7 @@ impl Client {
                         public_key: public_key.clone(),
                     },
                 },
-                |err| !is_retryable_error(err),
+                is_critical_query_error,
             )
             .await?;
 
@@ -389,7 +390,7 @@ impl Client {
                     },
                     wait_until,
                 },
-                |err| !is_retryable_error(err),
+                is_critical_status_error,
             )
             .await
             .map_err(Error::from)?;
@@ -413,10 +414,11 @@ impl Client {
 
 impl From<Client> for JsonRpcClient {
     fn from(client: Client) -> Self {
+        let idx = client.current_endpoint_index() % client.rpc_endpoints.len();
         client
             .rpc_endpoints
             .into_iter()
-            .next()
+            .nth(idx)
             .expect("at least one RPC client is required")
     }
 }
@@ -446,7 +448,9 @@ fn is_retryable_error<E>(err: &JsonRpcError<E>) -> bool {
 
 /// Classifies errors from sending transactions. Everything invalid about the
 /// transaction itself is critical, e.g. an invalid nonce, since retrying would
-/// just fail again. Retrying is only useful while the network itself is at fault.
+/// just fail again. Handler errors that merely reflect a node's view of the
+/// network (timeouts, routing, shard ownership, internal node errors) are not
+/// critical and should be retried on another endpoint.
 fn is_critical_tx_error(err: &JsonRpcError<RpcTransactionError>) -> bool {
     if is_retryable_error(err) {
         return false;
@@ -454,7 +458,50 @@ fn is_critical_tx_error(err: &JsonRpcError<RpcTransactionError>) -> bool {
     !matches!(
         err,
         JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
-            RpcTransactionError::TimeoutError(_) | RpcTransactionError::RequestRouted { .. }
+            RpcTransactionError::TimeoutError(_)
+                | RpcTransactionError::RequestRouted { .. }
+                | RpcTransactionError::DoesNotTrackShard
+                | RpcTransactionError::UnknownTransaction { .. }
+                | RpcTransactionError::InternalError { .. }
+        ))
+    )
+}
+
+/// Classifies errors from fetching a transaction's status. Along with retryable
+/// network errors, node-specific handler errors (timeouts, unknown transactions,
+/// untracked shards, routing, and internal node errors) are retried, e.g. when
+/// the transaction was routed to another node.
+fn is_critical_status_error(err: &JsonRpcError<RpcTransactionError>) -> bool {
+    if is_retryable_error(err) {
+        return false;
+    }
+    !matches!(
+        err,
+        JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+            RpcTransactionError::TimeoutError(_)
+                | RpcTransactionError::UnknownTransaction { .. }
+                | RpcTransactionError::DoesNotTrackShard
+                | RpcTransactionError::RequestRouted { .. }
+                | RpcTransactionError::InternalError { .. }
+        ))
+    )
+}
+
+/// Classifies errors from read-only queries. Node-specific handler errors are not
+/// critical: an endpoint that is still syncing or lacks the requested data can be
+/// retried on another endpoint. Malformed requests remain critical.
+fn is_critical_query_error(err: &JsonRpcError<RpcQueryError>) -> bool {
+    if is_retryable_error(err) {
+        return false;
+    }
+    !matches!(
+        err,
+        JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+            RpcQueryError::NoSyncedBlocks
+                | RpcQueryError::UnavailableShard { .. }
+                | RpcQueryError::GarbageCollectedBlock { .. }
+                | RpcQueryError::UnknownBlock { .. }
+                | RpcQueryError::InternalError { .. }
         ))
     )
 }
@@ -526,5 +573,69 @@ async fn fetch_nonce(
                 Ok((access_key.nonce + 1, block_hash, block_height))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::Server;
+    use near_jsonrpc_client::methods::health::RpcHealthRequest;
+
+    fn jsonrpc_client(addr: &str) -> JsonRpcClient {
+        JsonRpcClient::new_client().connect(addr)
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_fails_over_to_healthy_endpoint() {
+        let mut failing = Server::new_async().await;
+        let mut healthy = Server::new_async().await;
+
+        // Every attempt against the first endpoint returns a retryable HTTP 408.
+        let failing_mock = failing
+            .mock("POST", "/")
+            .with_status(408)
+            .expect(RETRIES_PER_ENDPOINT)
+            .create_async()
+            .await;
+        let healthy_mock = healthy
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":null,"id":1}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = Client::from_clients(vec![
+            jsonrpc_client(&failing.url()),
+            jsonrpc_client(&healthy.url()),
+        ]);
+
+        // Any error is retryable for this read-only query, so the failing endpoint
+        // is retried RETRIES_PER_ENDPOINT times before failing over.
+        let response = client.send_query(&RpcHealthRequest).await;
+        assert!(response.is_ok(), "unexpected error: {response:?}");
+        assert_eq!(client.current_endpoint_index(), 1);
+        failing_mock.assert_async().await;
+        healthy_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn critical_error_short_circuits_without_failover() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(400)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = Client::from_client(jsonrpc_client(&server.url()));
+        let result = client.call_with_retry(&RpcHealthRequest, |_| true).await;
+
+        assert!(result.is_err());
+        assert_eq!(client.current_endpoint_index(), 0);
+        mock.assert_async().await;
     }
 }
