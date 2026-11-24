@@ -729,4 +729,138 @@ mod tests {
         };
         assert_eq!(result.borsh::<u32>().unwrap(), 42);
     }
+
+    /// A minimal, offline `ProcessQuery` used to exercise the combinators without
+    /// issuing any RPC requests.
+    struct FakeQuery {
+        value: i32,
+        build_error: Option<&'static str>,
+        process_error: Option<&'static str>,
+    }
+
+    impl FakeQuery {
+        fn ok(value: i32) -> Self {
+            Self {
+                value,
+                build_error: None,
+                process_error: None,
+            }
+        }
+    }
+
+    impl ProcessQuery for FakeQuery {
+        type Method = methods::query::RpcQueryRequest;
+        type Output = i32;
+
+        fn build_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
+            if let Some(message) = self.build_error {
+                return Err(Error::InvalidArgs(message));
+            }
+            Ok(Self::Method {
+                block_reference,
+                request: QueryRequest::ViewAccount {
+                    account_id: "alice.near".parse().unwrap(),
+                },
+            })
+        }
+
+        fn process_response(&self, _resp: RpcQueryResponse) -> Result<Self::Output> {
+            match self.process_error {
+                Some(message) => Err(Error::InvalidArgs(message)),
+                None => Ok(self.value),
+            }
+        }
+    }
+
+    fn sample_response() -> RpcQueryResponse {
+        RpcQueryResponse {
+            kind: QueryResponseKind::CallResult(CallResult {
+                result: Vec::new(),
+                logs: Vec::new(),
+            }),
+            block_height: 1,
+            block_hash: CryptoHash::default(),
+        }
+    }
+
+    fn dummy_client() -> Client {
+        Client::from_client(
+            near_jsonrpc_client::JsonRpcClient::new_client().connect("http://127.0.0.1:1"),
+        )
+    }
+
+    #[test]
+    fn mapped_query_build_request_delegates_to_inner() {
+        let client = dummy_client();
+        let query = Query::new(&client, FakeQuery::ok(1)).map(|value| value + 1);
+        let block_reference = BlockReference::Finality(Finality::Final);
+
+        let request = query.method.build_request(block_reference.clone()).unwrap();
+        assert_eq!(request.block_reference, block_reference);
+
+        let failing = FakeQuery {
+            build_error: Some("build failed"),
+            ..FakeQuery::ok(1)
+        };
+        let err = failing.build_request(block_reference).unwrap_err();
+        assert!(matches!(err, Error::InvalidArgs("build failed")));
+    }
+
+    #[test]
+    fn mapped_query_map_transforms_response() {
+        let client = dummy_client();
+        let query = Query::new(&client, FakeQuery::ok(41)).map(|value| value + 1);
+
+        assert_eq!(
+            query.method.process_response(sample_response()).unwrap(),
+            42
+        );
+    }
+
+    #[test]
+    fn mapped_query_and_then_propagates_errors() {
+        let client = dummy_client();
+        let query = Query::new(&client, FakeQuery::ok(2)).and_then(|value| {
+            if value > 0 {
+                Ok(value * 3)
+            } else {
+                Err(Error::InvalidArgs("non-positive value"))
+            }
+        });
+        assert_eq!(query.method.process_response(sample_response()).unwrap(), 6);
+
+        let failing = Query::new(
+            &client,
+            FakeQuery {
+                process_error: Some("inner failed"),
+                ..FakeQuery::ok(2)
+            },
+        )
+        .and_then(|value| Ok(value + 1));
+        let err = failing
+            .method
+            .process_response(sample_response())
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidArgs("inner failed")));
+    }
+
+    #[test]
+    fn mapped_query_chained_combinators_compose() {
+        let client = dummy_client();
+        let query = Query::new(&client, FakeQuery::ok(2))
+            .map(|value| value * 3)
+            .and_then(|value| {
+                if value % 2 == 0 {
+                    Ok(value + 1)
+                } else {
+                    Err(Error::InvalidArgs("odd value"))
+                }
+            })
+            .map(|value| value.to_string());
+
+        assert_eq!(
+            query.method.process_response(sample_response()).unwrap(),
+            "7"
+        );
+    }
 }

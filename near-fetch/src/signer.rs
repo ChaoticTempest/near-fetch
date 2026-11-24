@@ -211,6 +211,8 @@ impl SignerExt for KeyRotatingSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use near_crypto::KeyType;
+    use near_jsonrpc_client::JsonRpcClient;
 
     fn hex_to_hash(hex: &str) -> CryptoHash {
         let bytes = (0..hex.len())
@@ -263,5 +265,59 @@ mod tests {
             callback_url: None,
         };
         assert_eq!(payload.extract_timestamp_from_nonce(), 1_700_000_000_000);
+    }
+
+    fn sample_message() -> OffchainMessage {
+        OffchainMessage {
+            message: "hi".into(),
+            nonce: [7u8; 32],
+            recipient: "myapp.com".into(),
+            callback_url: None,
+        }
+    }
+
+    fn in_memory_signer(account_id: &str) -> InMemorySigner {
+        let account_id: AccountId = account_id.parse().unwrap();
+        let secret_key = SecretKey::from_random(KeyType::ED25519);
+        let public_key = secret_key.public_key();
+        InMemorySigner {
+            account_id,
+            public_key,
+            secret_key,
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_bad_signature_without_rpc() {
+        let account_id: AccountId = "alice.near".parse().unwrap();
+        let signer = in_memory_signer("alice.near");
+        let impostor = in_memory_signer("alice.near");
+        let message = sample_message();
+        let bad_signature = SignerExt::sign(&impostor, message.compute_hash().as_ref());
+
+        // The client would fail if verify reached the RPC layer; a bad signature
+        // must short-circuit to Ok(false) before any access-key lookup.
+        let client = Client::from_client(JsonRpcClient::new_client().connect("http://127.0.0.1:1"));
+        let result = message
+            .verify(
+                &account_id,
+                SignerExt::public_key(&signer),
+                &bad_signature,
+                &client,
+            )
+            .await;
+        assert!(matches!(result, Ok(false)));
+    }
+
+    #[test]
+    fn sign_offchain_signature_verifies_over_hash() {
+        let signer = in_memory_signer("alice.near");
+        let message = sample_message();
+        let signature = SignerExt::sign_offchain(&signer, &message);
+
+        assert!(signature.verify(
+            message.compute_hash().as_ref(),
+            &SignerExt::public_key(&signer)
+        ));
     }
 }

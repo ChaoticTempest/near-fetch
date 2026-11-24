@@ -842,4 +842,46 @@ mod tests {
         assert!(!is_critical_tx_error(&err));
         assert!(!is_critical_status_error(&err));
     }
+
+    // These tests cover locally observable endpoint setup and initial selection.
+    // Failover behavior itself is exercised above with mock HTTP servers in
+    // `call_with_retry_fails_over_to_healthy_endpoint`.
+
+    fn dummy_client(addr: &str) -> JsonRpcClient {
+        JsonRpcClient::new_client().connect(addr)
+    }
+
+    #[test]
+    fn from_clients_starts_at_first_endpoint() {
+        let first = dummy_client("http://127.0.0.1:1");
+        let second = dummy_client("http://127.0.0.1:2");
+        let client = Client::from_clients(vec![first, second]);
+
+        assert_eq!(client.current_endpoint_index(), 0);
+        assert_eq!(client.endpoints().len(), 2);
+        assert_eq!(client.rpc_addr(), "http://127.0.0.1:1");
+        assert!(std::ptr::eq(client.inner(), client.current_endpoint()));
+        assert_eq!(client.endpoints()[0].server_addr(), "http://127.0.0.1:1");
+        assert_eq!(client.endpoints()[1].server_addr(), "http://127.0.0.1:2");
+    }
+
+    #[test]
+    fn new_with_endpoints_starts_at_first_endpoint() {
+        let client = Client::new_with_endpoints(&[
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:2",
+            "http://127.0.0.1:3",
+        ]);
+
+        assert_eq!(client.current_endpoint_index(), 0);
+        assert_eq!(client.endpoints().len(), 3);
+        assert_eq!(client.rpc_addr(), "http://127.0.0.1:1");
+        assert_eq!(
+            client.inner().server_addr(),
+            client.current_endpoint().server_addr()
+        );
+        assert_eq!(client.endpoints()[0].server_addr(), "http://127.0.0.1:1");
+        assert_eq!(client.endpoints()[1].server_addr(), "http://127.0.0.1:2");
+        assert_eq!(client.endpoints()[2].server_addr(), "http://127.0.0.1:3");
+    }
 }
