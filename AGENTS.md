@@ -113,7 +113,11 @@ annotated tag `X.Y.Z` (no `v` prefix) and a GitHub Release named after the tag
 with auto-generated release notes. Nothing is published to crates.io. The
 commit subject must be exactly `release: X.Y.Z`, optionally followed by
 ` (#N)` for squashed merges, and the version must match `near-fetch/Cargo.toml`
-exactly, including all three components.
+exactly, including all three components. On release PRs, CI's `release-bump` job
+also enforces a strict `release: X.Y.Z` title (optionally followed by ` (#N)`),
+a matching Cargo.toml version that is strictly greater than the version on the
+base branch, and the absence of an existing tag for that version. Run
+`just release-check X.Y.Z BASE` locally to check the version and bump yourself.
 
 Tagging is idempotent: an existing tag is left untouched and no duplicate
 Release is created. Legacy tags such as `0.11.0` and `0.12` are never rewritten

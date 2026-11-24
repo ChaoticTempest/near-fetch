@@ -43,8 +43,8 @@ coverage:
 coverage-check:
     cargo llvm-cov --package near-fetch --all-targets --summary-only --fail-under-lines {{cov_floor}}
 
-# Validate near-fetch's Cargo.toml version, optionally against an expected X.Y.Z.
-release-check expected="":
+# Validate near-fetch's Cargo.toml version against an expected X.Y.Z and/or require it to be strictly greater than a base X.Y.Z.
+release-check expected="" base="":
     #!/usr/bin/env bash
     set -euo pipefail
     version="$(cargo metadata --no-deps --format-version 1 \
@@ -53,6 +53,31 @@ release-check expected="":
     if [ -n "{{expected}}" ] && [ "$version" != "{{expected}}" ]; then
       echo "error: expected {{expected}}, found $version" >&2
       exit 1
+    fi
+    if [ -n "{{base}}" ]; then
+      semver_re='^[0-9]+\.[0-9]+\.[0-9]+$'
+      if [[ ! "$version" =~ $semver_re ]]; then
+        echo "error: version '$version' is not a three-component numeric version X.Y.Z" >&2
+        exit 1
+      fi
+      if [[ ! "{{base}}" =~ $semver_re ]]; then
+        echo "error: base '{{base}}' is not a three-component numeric version X.Y.Z" >&2
+        exit 1
+      fi
+      IFS=. read -r v_major v_minor v_patch <<< "$version"
+      IFS=. read -r b_major b_minor b_patch <<< "{{base}}"
+      v_parts=("$v_major" "$v_minor" "$v_patch")
+      b_parts=("$b_major" "$b_minor" "$b_patch")
+      greater=false
+      for i in 0 1 2; do
+        if (( v_parts[i] > b_parts[i] )); then greater=true; break; fi
+        if (( v_parts[i] < b_parts[i] )); then break; fi
+      done
+      if [ "$greater" != true ]; then
+        echo "error: version $version is not greater than base {{base}}" >&2
+        exit 1
+      fi
+      echo "version $version is greater than base {{base}}"
     fi
 
 # Check all feature combinations, including each TLS backend individually.
