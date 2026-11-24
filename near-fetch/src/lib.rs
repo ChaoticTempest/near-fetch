@@ -62,6 +62,12 @@ const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 /// Default number of retries after the initial attempt on each endpoint.
 const DEFAULT_RETRIES_PER_ENDPOINT: usize = 2;
 
+/// Default timeout applied to each individual RPC attempt.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default delay between async transaction status polls.
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(300);
+
 /// Client that implements retrying and caching of access key nonces, with failover
 /// support across multiple RPC endpoints.
 #[derive(Clone, Debug)]
@@ -78,6 +84,12 @@ pub struct Client {
     retry_backoff: Duration,
     /// Number of retries after the initial attempt on each endpoint.
     retries_per_endpoint: usize,
+    /// Timeout applied to each individual RPC attempt.
+    request_timeout: Duration,
+    /// Delay between async transaction status polls.
+    poll_interval: Duration,
+    /// Overall deadline for async transaction status polling, if any.
+    poll_timeout: Option<Duration>,
 }
 
 /// Builder for a [`Client`]: configures RPC endpoints and per-endpoint retry behavior.
@@ -100,6 +112,9 @@ pub struct ClientBuilder {
     rpc_endpoints: Vec<JsonRpcClient>,
     retry_backoff: Duration,
     retries_per_endpoint: usize,
+    request_timeout: Duration,
+    poll_interval: Duration,
+    poll_timeout: Option<Duration>,
 }
 
 impl Default for ClientBuilder {
@@ -108,6 +123,9 @@ impl Default for ClientBuilder {
             rpc_endpoints: Vec::new(),
             retry_backoff: DEFAULT_RETRY_BACKOFF,
             retries_per_endpoint: DEFAULT_RETRIES_PER_ENDPOINT,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            poll_interval: DEFAULT_POLL_INTERVAL,
+            poll_timeout: None,
         }
     }
 }
@@ -148,6 +166,36 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the timeout applied to *each* RPC attempt.
+    ///
+    /// Defaults to 30 seconds. A hung endpoint now times out instead of blocking
+    /// forever: the timeout is treated as a retryable error, so the attempt is
+    /// retried and then failed over to the next endpoint.
+    pub fn request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
+        self
+    }
+
+    /// Set the delay between async transaction status polls.
+    ///
+    /// Defaults to 300 ms. Used by [`crate::ops::AsyncTransactionStatus::wait`]
+    /// via `wait_default` and `IntoFuture`, replacing the previously hard-coded
+    /// 300 ms interval.
+    pub fn poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    /// Set an overall deadline for async transaction status polling.
+    ///
+    /// Defaults to `None`, meaning polling continues until the transaction
+    /// completes (the previous behavior). When set, exceeding the deadline
+    /// returns [`crate::Error::PollTimeout`] instead of polling forever.
+    pub fn poll_timeout(mut self, poll_timeout: Option<Duration>) -> Self {
+        self.poll_timeout = poll_timeout;
+        self
+    }
+
     /// Build a [`Client`] from the configured endpoints and retry settings.
     ///
     /// # Panics
@@ -165,6 +213,9 @@ impl ClientBuilder {
             current_endpoint_idx: Arc::new(AtomicUsize::new(0)),
             retry_backoff: self.retry_backoff,
             retries_per_endpoint: self.retries_per_endpoint,
+            request_timeout: self.request_timeout,
+            poll_interval: self.poll_interval,
+            poll_timeout: self.poll_timeout,
         }
     }
 }
@@ -226,6 +277,16 @@ impl Client {
         self.current_endpoint().server_addr().into()
     }
 
+    /// Delay between async transaction status polls, as configured on the builder.
+    pub(crate) fn poll_interval(&self) -> Duration {
+        self.poll_interval
+    }
+
+    /// Overall deadline for async transaction status polling, as configured on the builder.
+    pub(crate) fn poll_timeout(&self) -> Option<Duration> {
+        self.poll_timeout
+    }
+
     /// Call a JSON-RPC method with the network, retrying on retryable errors and
     /// failing over to the next RPC endpoint when one keeps failing. Errors where
     /// `is_critical` returns true abort the retrying immediately.
@@ -251,9 +312,21 @@ impl Client {
                 self.current_endpoint_idx.store(idx, Ordering::SeqCst);
             }
             let strategy = FixedInterval::new(self.retry_backoff).take(self.retries_per_endpoint);
+            let request_timeout = self.request_timeout;
             let retry = RetryIf::start(
                 strategy,
-                || client.call(method),
+                || async {
+                    match tokio::time::timeout(request_timeout, client.call(method)).await {
+                        Ok(result) => result,
+                        // A hung endpoint must not block forever: surface the elapsed
+                        // timer as the existing retryable "request timeout" status error.
+                        Err(_) => Err(JsonRpcError::ServerError(
+                            JsonRpcServerError::ResponseStatusError(
+                                JsonRpcServerResponseStatusError::TimeoutError,
+                            ),
+                        )),
+                    }
+                },
                 |err: &JsonRpcError<M::Error>| !is_critical(err),
             );
             match retry.await {
@@ -1254,6 +1327,9 @@ mod tests {
         assert_eq!(client.endpoints().len(), 1);
         assert_eq!(client.retry_backoff, Duration::from_millis(50));
         assert_eq!(client.retries_per_endpoint, 2);
+        assert_eq!(client.request_timeout, Duration::from_secs(30));
+        assert_eq!(client.poll_interval, Duration::from_millis(300));
+        assert_eq!(client.poll_timeout, None);
     }
 
     #[test]
@@ -1312,6 +1388,82 @@ mod tests {
             .build();
         assert_eq!(client.retry_backoff, Duration::from_millis(7));
         assert_eq!(client.retries_per_endpoint, 4);
+    }
+
+    #[test]
+    fn builder_timeout_settings_are_stored_on_client() {
+        let client = Client::builder()
+            .endpoint("http://127.0.0.1:1")
+            .request_timeout(Duration::from_secs(2))
+            .poll_interval(Duration::from_millis(7))
+            .poll_timeout(Some(Duration::from_secs(5)))
+            .build();
+        assert_eq!(client.request_timeout, Duration::from_secs(2));
+        assert_eq!(client.poll_interval(), Duration::from_millis(7));
+        assert_eq!(client.poll_timeout(), Some(Duration::from_secs(5)));
+    }
+
+    /// A mock endpoint that produces its response only after `delay`. Mockito
+    /// serves on its own thread/runtime, so this sleep does not block the
+    /// client's timer that enforces `request_timeout`.
+    async fn slow_mock(server: &mut Server, delay: Duration, attempts: usize) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |_| {
+                std::thread::sleep(delay);
+                jsonrpc_ok(serde_json::Value::Null)
+            })
+            .expect(attempts)
+            .create_async()
+            .await
+    }
+
+    #[tokio::test]
+    async fn request_timeout_expires_every_attempt() {
+        let mut server = Server::new_async().await;
+        // The response arrives after 60 ms, well past the 20 ms request timeout.
+        let mock = slow_mock(&mut server, Duration::from_millis(60), 3).await;
+        let client = Client::builder()
+            .request_timeout(Duration::from_millis(20))
+            // Space retries past the mock's 60 ms delay so the single-threaded
+            // mockito server is free to register every attempt.
+            .retry_backoff(Duration::from_millis(80))
+            .endpoint(&server.url())
+            .build();
+
+        let result = client.send_query(&RpcHealthRequest).await;
+        assert!(
+            matches!(
+                result,
+                Err(JsonRpcError::ServerError(
+                    JsonRpcServerError::ResponseStatusError(
+                        JsonRpcServerResponseStatusError::TimeoutError
+                    )
+                ))
+            ),
+            "unexpected error: {result:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn request_timeout_fails_over_to_healthy_endpoint() {
+        let mut slow = Server::new_async().await;
+        let mut healthy = Server::new_async().await;
+        let slow_mock = slow_mock(&mut slow, Duration::from_millis(60), 3).await;
+        let healthy_mock = healthy_mock(&mut healthy).await;
+        let client = Client::builder()
+            .request_timeout(Duration::from_millis(20))
+            .retry_backoff(Duration::from_millis(80))
+            .endpoints(&[slow.url().as_str(), healthy.url().as_str()])
+            .build();
+
+        assert!(client.send_query(&RpcHealthRequest).await.is_ok());
+        assert_eq!(client.current_endpoint_index(), 1);
+        slow_mock.assert_async().await;
+        healthy_mock.assert_async().await;
     }
 
     #[tokio::test]

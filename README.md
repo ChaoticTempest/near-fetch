@@ -116,7 +116,9 @@ Use `Client::builder()` to configure several RPC endpoints. Requests retry on
 transient failures and move to the next endpoint when one keeps failing. The
 builder also accepts existing `JsonRpcClient`s via `clients`, and lets you tune
 `retry_backoff` and `retries_per_endpoint` (retries *after* the initial attempt,
-2 by default).
+2 by default). Each RPC attempt times out after 30 s (`request_timeout`), so a
+hung endpoint is retried and then skipped; `poll_interval` (300 ms) and
+`poll_timeout` (unlimited by default) tune async status polling.
 
 ```rust
 use near_fetch::Client;

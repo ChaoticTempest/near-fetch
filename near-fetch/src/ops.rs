@@ -1235,6 +1235,102 @@ mod tests {
         );
         mock.assert_async().await;
     }
+
+    fn pending_tx_result() -> serde_json::Value {
+        serde_json::to_value(RpcTransactionResponse {
+            final_execution_outcome: None,
+            final_execution_status: TxExecutionStatus::Included,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn configured_poll_interval_is_used_across_polls() {
+        let pending = pending_tx_result();
+        let success = tx_result(
+            FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
+            TxExecutionStatus::Final,
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |_| {
+                if counter.fetch_add(1, Ordering::SeqCst) < 2 {
+                    jsonrpc_ok(pending.clone())
+                } else {
+                    jsonrpc_ok(success.clone())
+                }
+            })
+            .expect(3)
+            .create_async()
+            .await;
+        let client = Client::builder()
+            .poll_interval(Duration::from_millis(5))
+            .poll_timeout(Some(Duration::from_secs(2)))
+            .endpoint(&server.url())
+            .build();
+        let status = AsyncTransactionStatus::new(
+            client,
+            "alice.near".parse().unwrap(),
+            CryptoHash::default(),
+        );
+
+        let started = tokio::time::Instant::now();
+        let result = status.wait_default().await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(result.is_success());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "configured 5 ms poll interval was not used: {elapsed:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn poll_timeout_returns_error_for_always_pending_transaction() {
+        let pending = pending_tx_result();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                jsonrpc_ok(pending.clone())
+            })
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let client = Client::builder()
+            .poll_interval(Duration::from_millis(2))
+            .poll_timeout(Some(Duration::from_millis(50)))
+            .endpoint(&server.url())
+            .build();
+        let status = AsyncTransactionStatus::new(
+            client,
+            "alice.near".parse().unwrap(),
+            CryptoHash::default(),
+        );
+
+        // Going through `IntoFuture` proves the default wait path inherits the
+        // deadline. The outer guard only ensures the test itself cannot hang.
+        let result = tokio::time::timeout(Duration::from_secs(2), status.into_future()).await;
+        let err = result
+            .expect("polling hung past the configured deadline")
+            .unwrap_err();
+        match err {
+            Error::PollTimeout(timeout) => assert_eq!(timeout, Duration::from_millis(50)),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        mock.assert_async().await;
+    }
 }
 
 /// `TransactionStatus` object relating to an [`asynchronous transaction`] on the network.
@@ -1288,21 +1384,37 @@ impl AsyncTransactionStatus {
         }
     }
 
-    /// Wait until the completion of the transaction by polling [`AsyncTransactionStatus::status`].
+    /// Wait until the completion of the transaction by polling [`Self::status`].
+    ///
+    /// Uses the poll interval and optional overall poll deadline configured on
+    /// the client that produced this status handle.
     pub(crate) async fn wait_default(self) -> Result<ExecutionFinalResult> {
-        self.wait(Duration::from_millis(300)).await
+        let interval = self.client.poll_interval();
+        self.wait(interval).await
     }
 
     /// Wait until the transaction completes with a given time interval. This will poll the
-    /// [`AsyncTransactionStatus::status`] every interval until the transaction completes.
+    /// [`Self::status`] every interval until the transaction completes.
+    ///
+    /// When the client has a `poll_timeout` configured, it is enforced as an
+    /// overall deadline: exceeding it returns [`Error::PollTimeout`].
     pub async fn wait(self, interval: Duration) -> Result<ExecutionFinalResult> {
-        loop {
-            match self.status().await? {
-                Poll::Ready(val) => break Ok(val),
-                Poll::Pending => (),
-            }
+        let poll_timeout = self.client.poll_timeout();
+        let poll = async {
+            loop {
+                match self.status().await? {
+                    Poll::Ready(val) => break Ok(val),
+                    Poll::Pending => (),
+                }
 
-            tokio::time::sleep(interval).await;
+                tokio::time::sleep(interval).await;
+            }
+        };
+        match poll_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, poll)
+                .await
+                .map_err(|_| Error::PollTimeout(timeout))?,
+            None => poll.await,
         }
     }
 
