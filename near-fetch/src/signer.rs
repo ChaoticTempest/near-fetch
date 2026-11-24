@@ -363,4 +363,201 @@ mod tests {
             &SignerExt::public_key(&signer)
         ));
     }
+
+    fn rotating_signer() -> KeyRotatingSigner {
+        let first = in_memory_signer("alice.near");
+        let second = in_memory_signer("alice.near");
+        KeyRotatingSigner::from_signers([Signer::InMemory(first), Signer::InMemory(second)])
+    }
+
+    #[test]
+    fn try_from_iter_validates_entries() {
+        assert!(matches!(
+            KeyRotatingSigner::try_from_iter(Vec::new()),
+            Err(Error::InvalidArgs("must have at least one entry"))
+        ));
+
+        let key = SecretKey::from_random(KeyType::ED25519);
+        let mismatched = [
+            ("alice.near".parse().unwrap(), key.clone()),
+            ("bob.near".parse().unwrap(), key),
+        ];
+        assert!(matches!(
+            KeyRotatingSigner::try_from_iter(mismatched),
+            Err(Error::InvalidArgs(
+                "provided account ids are not all the same"
+            ))
+        ));
+
+        let account: AccountId = "alice.near".parse().unwrap();
+        let keys = [
+            (account.clone(), SecretKey::from_random(KeyType::ED25519)),
+            (account.clone(), SecretKey::from_random(KeyType::ED25519)),
+        ];
+        let rotating = KeyRotatingSigner::try_from_iter(keys).unwrap();
+        assert_eq!(rotating.account_id(), &account);
+        assert_eq!(rotating.current_signer().account_id(), &account);
+    }
+
+    #[test]
+    fn key_rotation_advances_on_sign_but_not_on_public_key_or_vrf() {
+        let rotating = rotating_signer();
+        let first_key = rotating.public_key();
+
+        let signature = SignerExt::sign(&rotating, b"payload");
+        assert!(signature.verify(b"payload", &first_key));
+        let second_key = rotating.public_key();
+        assert_ne!(first_key, second_key);
+
+        // Reading the current signer or public key does not advance the rotation.
+        assert_eq!(rotating.public_key(), second_key);
+        assert_eq!(rotating.fetch_and_rotate_signer().public_key(), second_key);
+        assert_eq!(rotating.public_key(), first_key);
+
+        let signature = KeyRotatingSigner::sign(&rotating, b"next");
+        assert!(signature.verify(b"next", &first_key));
+        assert_eq!(rotating.public_key(), second_key);
+
+        let (value, proof) = KeyRotatingSigner::compute_vrf_with_proof(&rotating, b"vrf");
+        assert_eq!(value.0.len(), 32);
+        assert_eq!(proof.0.len(), 64);
+        assert_eq!(rotating.public_key(), second_key);
+    }
+
+    #[test]
+    fn expose_account_id_impls() {
+        let signer = in_memory_signer("alice.near");
+        assert_eq!(
+            signer.account_id(),
+            &"alice.near".parse::<AccountId>().unwrap()
+        );
+
+        let wrapped = Signer::InMemory(signer);
+        assert_eq!(
+            wrapped.account_id(),
+            &"alice.near".parse::<AccountId>().unwrap()
+        );
+
+        let rotating = rotating_signer();
+        assert_eq!(
+            rotating.account_id(),
+            &"alice.near".parse::<AccountId>().unwrap()
+        );
+
+        let signature = SignerExt::sign(&wrapped, b"signer bytes");
+        assert!(signature.verify(b"signer bytes", &SignerExt::public_key(&wrapped)));
+    }
+
+    fn access_key_body(permission: serde_json::Value) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {
+                "nonce": 5,
+                "permission": permission,
+                "block_height": 7,
+                "block_hash": "11111111111111111111111111111111"
+            },
+            "id": 1
+        })
+        .to_string()
+    }
+
+    async fn verify_client(server: &mut mockito::Server) -> Client {
+        use near_jsonrpc_client::JsonRpcClient;
+
+        Client::from_client(JsonRpcClient::new_client().connect(server.url()))
+    }
+
+    #[tokio::test]
+    async fn verify_accepts_full_access_and_rejects_function_call_permission() {
+        let mut full_access = mockito::Server::new_async().await;
+        let full_mock = full_access
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(access_key_body(serde_json::Value::String(
+                "FullAccess".into(),
+            )))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = verify_client(&mut full_access).await;
+        let account_id: AccountId = "alice.near".parse().unwrap();
+        let signer = in_memory_signer("alice.near");
+        let message = sample_message();
+        let signature = SignerExt::sign(&signer, message.compute_hash().as_ref());
+        assert!(
+            message
+                .verify(
+                    &account_id,
+                    SignerExt::public_key(&signer),
+                    &signature,
+                    &client
+                )
+                .await
+                .unwrap()
+        );
+        full_mock.assert_async().await;
+
+        let mut restricted = mockito::Server::new_async().await;
+        let function_call = serde_json::json!({
+            "FunctionCall": {
+                "allowance": null,
+                "receiver_id": "contract.near",
+                "method_names": []
+            }
+        });
+        let restricted_mock = restricted
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(access_key_body(function_call))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = verify_client(&mut restricted).await;
+        assert!(
+            !message
+                .verify(
+                    &account_id,
+                    SignerExt::public_key(&signer),
+                    &signature,
+                    &client
+                )
+                .await
+                .unwrap()
+        );
+        restricted_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn verify_propagates_access_key_lookup_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(400)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = verify_client(&mut server).await;
+        let account_id: AccountId = "alice.near".parse().unwrap();
+        let signer = in_memory_signer("alice.near");
+        let message = sample_message();
+        let signature = SignerExt::sign(&signer, message.compute_hash().as_ref());
+        assert!(
+            message
+                .verify(
+                    &account_id,
+                    SignerExt::public_key(&signer),
+                    &signature,
+                    &client
+                )
+                .await
+                .is_err()
+        );
+        mock.assert_async().await;
+    }
 }

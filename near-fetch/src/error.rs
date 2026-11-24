@@ -89,3 +89,147 @@ impl From<JsonRpcError<RpcBroadcastTxAsyncError>> for Error {
         Error::RpcTransactionAsyncError(Box::new(err))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose;
+    use near_jsonrpc_client::errors::{JsonRpcTransportRecvError, RpcTransportError};
+    use near_jsonrpc_primitives::message::Message;
+    use near_primitives::errors::InvalidTxError;
+
+    use super::*;
+
+    fn transport_error<E>() -> JsonRpcError<E> {
+        JsonRpcError::TransportError(RpcTransportError::RecvError(
+            JsonRpcTransportRecvError::UnexpectedServerResponse(Box::new(Message::notification(
+                "test".into(),
+                serde_json::Value::Null,
+            ))),
+        ))
+    }
+
+    fn tx_execution_error() -> TxExecutionError {
+        TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce {
+            tx_nonce: 1,
+            ak_nonce: 2,
+        })
+    }
+
+    #[test]
+    fn from_jsonrpc_errors_wrap_in_the_matching_variant() {
+        assert!(matches!(
+            Error::from(transport_error::<RpcBlockError>()),
+            Error::RpcBlockError(_)
+        ));
+        assert!(matches!(
+            Error::from(transport_error::<RpcQueryError>()),
+            Error::RpcQueryError(_)
+        ));
+        assert!(matches!(
+            Error::from(transport_error::<RpcChunkError>()),
+            Error::RpcChunkError(_)
+        ));
+        assert!(matches!(
+            Error::from(transport_error::<RpcTransactionError>()),
+            Error::RpcTransactionError(_)
+        ));
+        assert!(matches!(
+            Error::from(transport_error::<RpcBroadcastTxAsyncError>()),
+            Error::RpcTransactionAsyncError(_)
+        ));
+    }
+
+    #[test]
+    fn display_messages_for_every_variant() {
+        let cases: Vec<(Error, &str)> = vec![
+            (
+                Error::RpcBlockError(Box::new(transport_error())),
+                "unexpected server response",
+            ),
+            (
+                Error::RpcQueryError(Box::new(transport_error())),
+                "unexpected server response",
+            ),
+            (
+                Error::RpcChunkError(Box::new(transport_error())),
+                "unexpected server response",
+            ),
+            (
+                Error::RpcTransactionError(Box::new(transport_error())),
+                "unexpected server response",
+            ),
+            (
+                Error::RpcTransactionAsyncError(Box::new(transport_error())),
+                "unexpected server response",
+            ),
+            (
+                Error::RpcTransactionPending,
+                "transaction has not completed yet",
+            ),
+            (
+                Error::RpcReturnedInvalidData("bad payload".into()),
+                "invalid data returned: bad payload",
+            ),
+            (
+                Error::Rpc(Box::new(std::io::Error::other("boom"))),
+                "rpc: boom",
+            ),
+            (
+                Error::TxExecution(Box::new(tx_execution_error())),
+                "must be larger",
+            ),
+            (Error::TxStatus("Started"), "tx_status=Started"),
+            (
+                Error::Serialization(serde_json::from_str::<u8>("nope").unwrap_err()),
+                "expected ident",
+            ),
+            (
+                Error::Base64(general_purpose::STANDARD.decode("!!!").unwrap_err()),
+                "Invalid symbol",
+            ),
+            (Error::Io(std::io::Error::other("disk")), "disk"),
+            (
+                Error::InvalidArgs("missing id"),
+                "invalid args were passed: missing id",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(expected),
+                "display {rendered:?} did not contain {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_is_available_on_every_variant() {
+        use general_purpose::STANDARD;
+
+        // Transparent variants delegate `source` to the wrapped error; leaf
+        // errors such as `serde_json::Error` have no source of their own.
+        let errors = vec![
+            Error::from(transport_error::<RpcBlockError>()),
+            Error::from(transport_error::<RpcQueryError>()),
+            Error::from(transport_error::<RpcChunkError>()),
+            Error::from(transport_error::<RpcTransactionError>()),
+            Error::from(transport_error::<RpcBroadcastTxAsyncError>()),
+            Error::RpcTransactionPending,
+            Error::RpcReturnedInvalidData("bad".into()),
+            Error::Rpc(Box::new(std::io::Error::other("boom"))),
+            Error::TxExecution(Box::new(tx_execution_error())),
+            Error::TxStatus("Started"),
+            Error::Serialization(serde_json::from_str::<u8>("x").unwrap_err()),
+            Error::Base64(STANDARD.decode("!!!").unwrap_err()),
+            Error::Io(std::io::Error::other("disk")),
+            Error::InvalidArgs("bad"),
+        ];
+        for error in errors {
+            let _ = error.source();
+        }
+    }
+}
