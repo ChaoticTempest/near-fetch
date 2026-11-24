@@ -1,11 +1,11 @@
 [package]
 name = "near-fetch"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 readme = "../README.md"
-repository = "https://github.com/ChaoticTempest/fetch"
+repository = "https://github.com/ChaoticTempest/near-fetch"
 description = """
 High level client library for transacting to the NEAR network.
 """
