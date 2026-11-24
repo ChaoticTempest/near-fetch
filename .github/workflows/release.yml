@@ -10,6 +10,12 @@ on:
     types: [completed]
     branches: [main]
 
+# Serialize duplicate workflow_run completions for the same commit; never
+# cancel a release once it has started.
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
 jobs:
   tag_and_release:
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
@@ -58,19 +64,19 @@ jobs:
         run: |
           set -euo pipefail
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            echo "Tag ${TAG} already exists; skipping tag creation and release."
-            echo "created=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "Tag ${TAG} already exists; reusing it."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "${TAG}"
+            git push origin "refs/tags/${TAG}"
+            echo "Created and pushed annotated tag ${TAG}."
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "${TAG}"
-          git push origin "refs/tags/${TAG}"
-          echo "created=true" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=true" >> "$GITHUB_OUTPUT"
 
       - name: Derive previous tag
         id: previous
-        if: steps.tag.outputs.created == 'true'
+        if: steps.tag.outputs.tag_exists == 'true'
         run: |
           set -euo pipefail
           # Newest other tag by version sort, excluding the one just created.
@@ -84,8 +90,26 @@ jobs:
             echo "No previous tag found; release notes will cover full history."
           fi
 
+      # The tag may already exist from a run that pushed it but failed before
+      # creating the Release. Always check GitHub before creating one so reruns
+      # recover from that partial failure without producing duplicates.
+      - name: Check for an existing GitHub Release
+        id: release_check
+        if: steps.tag.outputs.tag_exists == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release for ${TAG} already exists; skipping creation."
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release for ${TAG} found; will create one."
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
-        if: steps.tag.outputs.created == 'true'
+        if: steps.tag.outputs.tag_exists == 'true' && steps.release_check.outputs.release_exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
