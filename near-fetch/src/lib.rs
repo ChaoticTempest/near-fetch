@@ -626,6 +626,104 @@ mod tests {
         healthy_mock.assert_async().await;
     }
 
+    fn status_request() -> methods::tx::RpcTransactionStatusRequest {
+        methods::tx::RpcTransactionStatusRequest {
+            transaction_info: methods::tx::TransactionInfo::TransactionId {
+                sender_account_id: "alice.near".parse().unwrap(),
+                tx_hash: CryptoHash::default(),
+            },
+            wait_until: TxExecutionStatus::Final,
+        }
+    }
+
+    fn tx_handler_error_body(err: RpcTransactionError) -> String {
+        let rpc_error: near_jsonrpc_primitives::errors::RpcError = err.into();
+        serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": rpc_error,
+            "id": 1,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn status_timeout_is_retried_with_status_error_classifier() {
+        let mut server = Server::new_async().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let timeout_body = tx_handler_error_body(RpcTransactionError::TimeoutError(None));
+        let success_body =
+            r#"{"jsonrpc":"2.0","result":{"final_execution_status":"FINAL"},"id":1}"#.to_owned();
+
+        // First response is a node-specific handler timeout; the following one succeeds.
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |_| {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    timeout_body.as_bytes().to_vec()
+                } else {
+                    success_body.as_bytes().to_vec()
+                }
+            })
+            .expect_at_least(2)
+            .create_async()
+            .await;
+
+        let client = Client::from_client(jsonrpc_client(&server.url()));
+        let result = client
+            .call_with_retry(&status_request(), is_critical_status_error)
+            .await;
+
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+        // If status timeouts were classified as critical, only one request would be made.
+        assert!(
+            attempts.load(Ordering::SeqCst) > 1,
+            "status timeout was not retried"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn critical_status_handler_error_is_not_retried() {
+        let mut server = Server::new_async().await;
+        let body = tx_handler_error_body(RpcTransactionError::InvalidTransaction {
+            context: InvalidTxError::InvalidNonce {
+                tx_nonce: 1,
+                ak_nonce: 2,
+            },
+        });
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = Client::from_client(jsonrpc_client(&server.url()));
+        let result = client
+            .call_with_retry(&status_request(), is_critical_status_error)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "expected a critical handler error: {result:?}"
+        );
+        assert!(
+            matches!(
+                result,
+                Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+                    RpcTransactionError::InvalidTransaction { .. }
+                )))
+            ),
+            "unexpected error: {result:?}"
+        );
+        mock.assert_async().await;
+    }
+
     #[tokio::test]
     async fn critical_error_short_circuits_without_failover() {
         let mut server = Server::new_async().await;
