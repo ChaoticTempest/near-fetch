@@ -1,3 +1,16 @@
+//! High-level client library for transacting with and querying the NEAR network.
+//!
+//! [`Client`] is the main entry point: construct one with [`Client::new`] or
+//! [`Client::new_with_endpoints`], then use its builder methods to send transactions
+//! ([`Client::send_tx`], [`Client::batch`], [`Client::call`]) or to query chain state
+//! ([`Client::view`], [`Client::view_account`], [`Client::gas_price`], and friends).
+//!
+//! Requests are retried on transient failures and fail over across the configured RPC
+//! endpoints. Access-key nonces are cached and invalidated automatically when the network
+//! reports a stale nonce.
+
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
@@ -26,10 +39,12 @@ use near_primitives::views::{
     FinalExecutionStatus, QueryRequest, TxExecutionStatus,
 };
 
+/// Error and result types returned by the client.
 pub mod error;
 pub mod ops;
 pub mod query;
 pub mod result;
+/// Signing helpers, including NEP-413 off-chain message support.
 pub mod signer;
 
 use crate::error::Result;
@@ -69,7 +84,19 @@ impl Client {
     }
 
     /// Construct a new [`Client`] with multiple RPC addresses, where requests will
-    /// failover to the next endpoint when the previous one fails.
+    /// fail over to the next endpoint when the previous one fails.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use near_fetch::Client;
+    ///
+    /// let client = Client::new_with_endpoints(&[
+    ///     "https://rpc.mainnet.near.org",
+    ///     "https://archival-rpc.mainnet.near.org",
+    /// ]);
+    /// assert_eq!(client.endpoints().len(), 2);
+    /// ```
     pub fn new_with_endpoints(rpc_addrs: &[&str]) -> Self {
         assert!(
             !rpc_addrs.is_empty(),
@@ -179,8 +206,39 @@ impl Client {
     }
 
     /// Send a series of [`Action`]s as a [`SignedTransaction`] to the network.
-    /// This gives us a transaction is that retryable. To retry, simply add in a `.retry_*`
-    /// method call to the end of the chain before an `.await` gets invoked.
+    ///
+    /// The returned [`RetryableTransaction`] can be awaited directly to send once, or
+    /// configured with retries via its `retry_*` methods before awaiting.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use near_account_id::AccountId;
+    /// use near_crypto::{InMemorySigner, KeyType, SecretKey};
+    /// use near_fetch::Client;
+    /// use near_primitives::transaction::TransferAction;
+    /// use near_token::NearToken;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::new("https://rpc.testnet.near.org");
+    /// let sender: AccountId = "alice.testnet".parse()?;
+    /// let receiver: AccountId = "bob.testnet".parse()?;
+    /// let secret_key = SecretKey::from_random(KeyType::ED25519);
+    /// let signer = InMemorySigner::from_secret_key(sender, secret_key);
+    ///
+    /// let outcome = client
+    ///     .send_tx(
+    ///         &signer,
+    ///         &receiver,
+    ///         vec![TransferAction {
+    ///             deposit: NearToken::from_near(1),
+    ///         }
+    ///         .into()],
+    ///     )
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn send_tx<'a>(
         &self,
         signer: &'a dyn SignerExt,
@@ -336,6 +394,10 @@ impl Client {
         }
     }
 
+    /// Invalidate the cached nonce for `cache_key` if `result` reports a stale nonce.
+    ///
+    /// Called after sending a transaction: an `InvalidNonce` error means the locally
+    /// cached access-key nonce is behind the network and must be refetched.
     pub async fn check_and_invalidate_cache(
         &self,
         cache_key: &CacheKey,
@@ -369,6 +431,7 @@ impl Client {
         }
     }
 
+    /// Remove the cached access-key nonce for `cache_key`, forcing a refetch on next use.
     pub async fn invalidate_cache(&self, cache_key: &CacheKey) {
         let mut nonces = self.access_key_nonces.write().await;
         nonces.remove(cache_key);

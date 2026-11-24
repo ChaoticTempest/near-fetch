@@ -23,7 +23,7 @@ use near_token::NearToken;
 use crate::ops::Function;
 use crate::{Client, Error, Result};
 
-/// Intenral type used to represent a boxed future.
+/// Internal type used to represent a boxed future.
 pub(crate) type BoxFuture<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
@@ -219,42 +219,50 @@ pub trait ProcessQuery {
     -> Result<Self::Output>;
 }
 
+/// Query method for calling a view function on a contract, created by [`Client::view`].
 #[derive(Clone)]
 pub struct ViewFunction {
     pub(crate) account_id: AccountId,
     pub(crate) function: Function,
 }
 
+/// Query method for fetching a contract's WASM bytes, created by [`Client::view_code`].
 #[derive(Clone)]
 pub struct ViewCode {
     pub(crate) account_id: AccountId,
 }
 
+/// Query method for fetching account details, created by [`Client::view_account`].
 #[derive(Clone)]
 pub struct ViewAccount {
     pub(crate) account_id: AccountId,
 }
 
+/// Query method for fetching a block, created by [`Client::view_block`].
 #[derive(Clone)]
 pub struct ViewBlock;
 
+/// Query method for viewing contract state, created by [`Client::view_state`].
 #[derive(Clone)]
 pub struct ViewState {
     account_id: AccountId,
     prefix: Option<Vec<u8>>,
 }
 
+/// Query method for fetching a single access key, created by [`Client::view_access_key`].
 #[derive(Clone)]
 pub struct ViewAccessKey {
     pub(crate) account_id: AccountId,
     pub(crate) public_key: PublicKey,
 }
 
+/// Query method for listing an account's access keys, created by [`Client::view_access_keys`].
 #[derive(Clone)]
 pub struct ViewAccessKeyList {
     pub(crate) account_id: AccountId,
 }
 
+/// Query method for fetching the current gas price, created by [`Client::gas_price`].
 #[derive(Clone)]
 pub struct GasPrice;
 

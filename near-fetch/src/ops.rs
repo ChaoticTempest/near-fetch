@@ -1,4 +1,4 @@
-//! All operation types that are generated/used when commiting transactions to the network.
+//! All operation types that are generated/used when committing transactions to the network.
 
 use std::fmt;
 use std::sync::Arc;
@@ -155,6 +155,10 @@ impl Function {
     }
 }
 
+/// Builder for a single function-call transaction, created by [`Client::call`].
+///
+/// Use the builder methods to set arguments, gas, and deposit before calling
+/// [`FunctionCallTransaction::transact`] or [`FunctionCallTransaction::transact_async`].
 pub struct FunctionCallTransaction<'a> {
     pub(crate) client: Client,
     pub(crate) signer: &'a dyn SignerExt,
@@ -247,8 +251,11 @@ impl FunctionCallTransaction<'_> {
         ))
     }
 
-    /// Retry this transactions if it fails. This will retry the transaction with exponential
-    /// backoff. This cannot be used in combination with
+    /// Retry this transaction if it fails, using exponential backoff with jitter.
+    ///
+    /// `base_millis` is the initial delay and `max_retries` caps the number of
+    /// attempts after the first one. This replaces any retry strategy previously
+    /// set with [`FunctionCallTransaction::retry`].
     pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
         self.retry(
             ExponentialBackoff::from_millis(base_millis)
@@ -459,6 +466,11 @@ impl Transaction<'_> {
     }
 }
 
+/// A future-like transaction builder returned by [`Client::send_tx`].
+///
+/// Awaiting it sends the transaction once; call [`RetryableTransaction::retry`]
+/// or [`RetryableTransaction::retry_exponential`] first to configure retries on
+/// failure. It also implements [`std::future::IntoFuture`], so it can be awaited directly.
 pub struct RetryableTransaction<'a> {
     pub(crate) client: Client,
     pub(crate) signer: &'a dyn SignerExt,
@@ -606,8 +618,10 @@ impl AsyncTransactionStatus {
         }
     }
 
-    /// Query the status of the transaction. This will return an [`AsyncTransactionStatus`]
-    /// object that we can use to query into the status of the transaction.
+    /// Poll the status of the transaction.
+    ///
+    /// Returns `Ok(Poll::Pending)` while the transaction has not been included yet,
+    /// and `Ok(Poll::Ready(result))` once its execution result is available.
     pub async fn status(&self) -> Result<Poll<ExecutionFinalResult>> {
         let result = self
             .client
@@ -652,7 +666,7 @@ impl AsyncTransactionStatus {
         }
     }
 
-    /// Waits until a sepcific transaction status is reached.
+    /// Waits until a specific transaction status is reached.
     pub async fn wait_until(self, wait_until: TxExecutionStatus) -> Result<ExecutionFinalResult> {
         self.client
             .status_tx_async(&self.sender_id, self.hash, wait_until)
