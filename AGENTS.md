@@ -34,16 +34,16 @@ starting with `release: `).
 - Unit tests live in `#[cfg(test)]` modules inside `near-fetch/src/*.rs`, covering
   failover, error classification, nonce handling, query combinators, signing,
   and result decoding.
-- Doctests total 5: two in `lib.rs` (`new_with_endpoints`, `send_tx`), two in
+- Doctests total 5: two in `lib.rs` (`ClientBuilder`, `send_tx`), two in
   `query.rs` (`map`, `and_then`), and one in `signer.rs` (`sign_offchain`). Four
   are marked `no_run`; the `sign_offchain` example actually executes.
 
 ## Architecture
 
-- `near-fetch/src/lib.rs` — the `Client` entry point: `new`, `new_with_endpoints`,
-  `from_client(s)`, query/send methods, per-endpoint retry with failover, the
+- `near-fetch/src/lib.rs` — the `Client` entry point: `new`, `builder()`, and
+  `from_client`, query/send methods, per-endpoint retry with failover, the
   shared `current_endpoint_idx`, and the access-key nonce cache with stale-nonce
-  invalidation.
+  invalidation. `ClientBuilder` configures endpoints, backoff and retry count.
 - `near-fetch/src/signer.rs` — `SignerExt`, `ExposeAccountId`, `OffchainMessage`
   (NEP-413 hashing/verification), and `KeyRotatingSigner`.
 - `near-fetch/src/query.rs` — `Query`/`ProcessQuery` builders for view calls,

@@ -112,18 +112,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Fail over across RPC endpoints
 
-Use `Client::new_with_endpoints` to configure several RPC endpoints. Requests
-retry on transient failures and move to the next endpoint when one keeps
-failing.
+Use `Client::builder()` to configure several RPC endpoints. Requests retry on
+transient failures and move to the next endpoint when one keeps failing. The
+builder also accepts existing `JsonRpcClient`s via `clients`, and lets you tune
+`retry_backoff` and `retries_per_endpoint` (retries *after* the initial attempt,
+2 by default).
 
 ```rust
 use near_fetch::Client;
 
 fn main() {
-    let client = Client::new_with_endpoints(&[
-        "https://rpc.mainnet.near.org",
-        "https://archival-rpc.mainnet.near.org",
-    ]);
+    let client = Client::builder()
+        .endpoints(&[
+            "https://rpc.mainnet.near.org",
+            "https://archival-rpc.mainnet.near.org",
+        ])
+        .build();
     assert_eq!(client.endpoints().len(), 2);
 }
 ```

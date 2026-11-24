@@ -1,7 +1,7 @@
 //! High-level client library for transacting with and querying the NEAR network.
 //!
 //! [`Client`] is the main entry point: construct one with [`Client::new`] or
-//! [`Client::new_with_endpoints`], then use its builder methods to send transactions
+//! [`Client::builder`], then use its builder methods to send transactions
 //! ([`Client::send_tx`], [`Client::batch`], [`Client::call`]) or to query chain state
 //! ([`Client::view`], [`Client::view_account`], [`Client::gas_price`], and friends).
 //!
@@ -56,12 +56,11 @@ pub use crate::error::Error;
 /// Cache key for access key nonces.
 pub type CacheKey = (AccountId, PublicKey);
 
-/// Total number of attempts per RPC endpoint before failing over, including the
-/// initial attempt (a value of 3 means 3 attempts, i.e. 2 retries).
-const RETRIES_PER_ENDPOINT: usize = 3;
+/// Default delay between retry attempts used by [`ClientBuilder`].
+const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
-/// Time to wait between each retry attempt.
-const RETRY_BACKOFF: Duration = Duration::from_millis(50);
+/// Default number of retries after the initial attempt on each endpoint.
+const DEFAULT_RETRIES_PER_ENDPOINT: usize = 2;
 
 /// Client that implements retrying and caching of access key nonces, with failover
 /// support across multiple RPC endpoints.
@@ -75,54 +74,119 @@ pub struct Client {
     /// Index of the most recently selected RPC endpoint. Shared across clones so
     /// that all clones of a client fail over together.
     current_endpoint_idx: Arc<AtomicUsize>,
+    /// Delay between retry attempts on each endpoint.
+    retry_backoff: Duration,
+    /// Number of retries after the initial attempt on each endpoint.
+    retries_per_endpoint: usize,
+}
+
+/// Builder for a [`Client`]: configures RPC endpoints and per-endpoint retry behavior.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use near_fetch::Client;
+///
+/// let client = Client::builder()
+///     .endpoints(&[
+///         "https://rpc.mainnet.near.org",
+///         "https://archival-rpc.mainnet.near.org",
+///     ])
+///     .build();
+/// assert_eq!(client.endpoints().len(), 2);
+/// ```
+#[derive(Clone, Debug)]
+pub struct ClientBuilder {
+    rpc_endpoints: Vec<JsonRpcClient>,
+    retry_backoff: Duration,
+    retries_per_endpoint: usize,
+}
+
+impl Default for ClientBuilder {
+    fn default() -> Self {
+        Self {
+            rpc_endpoints: Vec::new(),
+            retry_backoff: DEFAULT_RETRY_BACKOFF,
+            retries_per_endpoint: DEFAULT_RETRIES_PER_ENDPOINT,
+        }
+    }
+}
+
+impl ClientBuilder {
+    /// Append a JSON-RPC endpoint created from `rpc_addr` to the endpoint list.
+    pub fn endpoint(mut self, rpc_addr: &str) -> Self {
+        self.rpc_endpoints
+            .push(JsonRpcClient::new_client().connect(rpc_addr));
+        self
+    }
+
+    /// Append each address in `rpc_addrs` as an endpoint, in order.
+    pub fn endpoints(self, rpc_addrs: &[&str]) -> Self {
+        rpc_addrs
+            .iter()
+            .fold(self, |builder, rpc_addr| builder.endpoint(rpc_addr))
+    }
+
+    /// Append existing [`JsonRpcClient`]s to the endpoint list, in iteration order.
+    pub fn clients(mut self, clients: impl IntoIterator<Item = JsonRpcClient>) -> Self {
+        self.rpc_endpoints.extend(clients);
+        self
+    }
+
+    /// Set the delay between retry attempts on each endpoint.
+    pub fn retry_backoff(mut self, retry_backoff: Duration) -> Self {
+        self.retry_backoff = retry_backoff;
+        self
+    }
+
+    /// Set the number of retries *after* the initial attempt on each endpoint.
+    ///
+    /// A value of `n` allows up to `n + 1` attempts per endpoint before failing
+    /// over to the next one. The default is 2, i.e. 3 attempts per endpoint.
+    pub fn retries_per_endpoint(mut self, retries_per_endpoint: usize) -> Self {
+        self.retries_per_endpoint = retries_per_endpoint;
+        self
+    }
+
+    /// Build a [`Client`] from the configured endpoints and retry settings.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no endpoints were added via [`Self::endpoint`], [`Self::endpoints`]
+    /// or [`Self::clients`].
+    pub fn build(self) -> Client {
+        assert!(
+            !self.rpc_endpoints.is_empty(),
+            "at least one RPC endpoint is required"
+        );
+        Client {
+            rpc_endpoints: self.rpc_endpoints,
+            access_key_nonces: Arc::new(RwLock::new(HashMap::new())),
+            current_endpoint_idx: Arc::new(AtomicUsize::new(0)),
+            retry_backoff: self.retry_backoff,
+            retries_per_endpoint: self.retries_per_endpoint,
+        }
+    }
 }
 
 impl Client {
     /// Construct a new [`Client`] with the given RPC address.
+    ///
+    /// Equivalent to `Client::builder().endpoint(rpc_addr).build()`.
     pub fn new(rpc_addr: &str) -> Self {
-        Self::new_with_endpoints(std::slice::from_ref(&rpc_addr))
+        Self::builder().endpoint(rpc_addr).build()
     }
 
-    /// Construct a new [`Client`] with multiple RPC addresses, where requests will
-    /// fail over to the next endpoint when the previous one fails.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use near_fetch::Client;
-    ///
-    /// let client = Client::new_with_endpoints(&[
-    ///     "https://rpc.mainnet.near.org",
-    ///     "https://archival-rpc.mainnet.near.org",
-    /// ]);
-    /// assert_eq!(client.endpoints().len(), 2);
-    /// ```
-    pub fn new_with_endpoints(rpc_addrs: &[&str]) -> Self {
-        assert!(
-            !rpc_addrs.is_empty(),
-            "at least one RPC address is required"
-        );
-        let rpc_endpoints = rpc_addrs
-            .iter()
-            .map(|rpc_addr| JsonRpcClient::new_client().connect(*rpc_addr))
-            .collect();
-        Self::from_clients(rpc_endpoints)
+    /// Start configuring a [`Client`] with endpoints and retry settings.
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::default()
     }
 
     /// Construct a [`Client`] from an existing [`JsonRpcClient`].
+    ///
+    /// Equivalent to `Client::builder().clients([client]).build()`.
     pub fn from_client(client: JsonRpcClient) -> Self {
-        Self::from_clients(vec![client])
-    }
-
-    /// Construct a [`Client`] from a list of existing [`JsonRpcClient`]s, where requests
-    /// will failover to the next client when the previous one fails.
-    pub fn from_clients(clients: Vec<JsonRpcClient>) -> Self {
-        assert!(!clients.is_empty(), "at least one RPC client is required");
-        Self {
-            rpc_endpoints: clients,
-            access_key_nonces: Arc::new(RwLock::new(HashMap::new())),
-            current_endpoint_idx: Arc::new(AtomicUsize::new(0)),
-        }
+        Self::builder().clients([client]).build()
     }
 
     /// Internal reference to the most recently selected [`JsonRpcClient`] used for RPC calls.
@@ -186,7 +250,7 @@ impl Client {
             if offset > 0 {
                 self.current_endpoint_idx.store(idx, Ordering::SeqCst);
             }
-            let strategy = FixedInterval::new(RETRY_BACKOFF).take(RETRIES_PER_ENDPOINT - 1);
+            let strategy = FixedInterval::new(self.retry_backoff).take(self.retries_per_endpoint);
             let retry = RetryIf::start(
                 strategy,
                 || client.call(method),
@@ -826,7 +890,7 @@ mod tests {
         let failing_mock = failing
             .mock("POST", "/")
             .with_status(408)
-            .expect(RETRIES_PER_ENDPOINT)
+            .expect(3) // default: 2 retries plus the initial attempt
             .create_async()
             .await;
         let healthy_mock = healthy
@@ -838,13 +902,15 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Client::from_clients(vec![
-            jsonrpc_client(&failing.url()),
-            jsonrpc_client(&healthy.url()),
-        ]);
+        let client = Client::builder()
+            .clients(vec![
+                jsonrpc_client(&failing.url()),
+                jsonrpc_client(&healthy.url()),
+            ])
+            .build();
 
         // Any error is retryable for this read-only query, so the failing endpoint
-        // is retried RETRIES_PER_ENDPOINT times before failing over.
+        // gets the default 3 attempts before failing over.
         let response = client.send_query(&RpcHealthRequest).await;
         assert!(response.is_ok(), "unexpected error: {response:?}");
         assert_eq!(client.current_endpoint_index(), 1);
@@ -1084,25 +1150,31 @@ mod tests {
     }
 
     async fn timeout_mock(server: &mut Server) -> mockito::Mock {
+        timeout_mock_with_attempts(server, 3).await
+    }
+
+    async fn timeout_mock_with_attempts(server: &mut Server, attempts: usize) -> mockito::Mock {
         server
             .mock("POST", "/")
             .with_status(408)
-            .expect(RETRIES_PER_ENDPOINT)
+            .expect(attempts)
             .create_async()
             .await
     }
 
     #[tokio::test]
-    async fn from_clients_fails_over_to_second_endpoint() {
+    async fn builder_clients_fail_over_to_second_endpoint() {
         let mut first = Server::new_async().await;
         let mut second = Server::new_async().await;
         let failing = timeout_mock(&mut first).await;
         let healthy = healthy_mock(&mut second).await;
 
-        let client = Client::from_clients(vec![
-            jsonrpc_client(&first.url()),
-            jsonrpc_client(&second.url()),
-        ]);
+        let client = Client::builder()
+            .clients(vec![
+                jsonrpc_client(&first.url()),
+                jsonrpc_client(&second.url()),
+            ])
+            .build();
         // Clone before failover: the selection index is shared across clones.
         let clone = client.clone();
 
@@ -1124,7 +1196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_with_endpoints_fails_over_to_last_endpoint() {
+    async fn builder_endpoints_fail_over_to_last_endpoint() {
         let mut first = Server::new_async().await;
         let mut second = Server::new_async().await;
         let mut third = Server::new_async().await;
@@ -1132,11 +1204,13 @@ mod tests {
         let failing_second = timeout_mock(&mut second).await;
         let healthy = healthy_mock(&mut third).await;
 
-        let client = Client::new_with_endpoints(&[
-            first.url().as_str(),
-            second.url().as_str(),
-            third.url().as_str(),
-        ]);
+        let client = Client::builder()
+            .endpoints(&[
+                first.url().as_str(),
+                second.url().as_str(),
+                third.url().as_str(),
+            ])
+            .build();
         let clone = client.clone();
 
         assert_eq!(client.current_endpoint_index(), 0);
@@ -1175,15 +1249,123 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "at least one RPC address is required")]
-    fn empty_endpoints_are_rejected() {
-        Client::new_with_endpoints(&[]);
+    fn builder_defaults() {
+        let client = Client::builder().endpoint("http://127.0.0.1:1").build();
+        assert_eq!(client.endpoints().len(), 1);
+        assert_eq!(client.retry_backoff, Duration::from_millis(50));
+        assert_eq!(client.retries_per_endpoint, 2);
     }
 
     #[test]
-    #[should_panic(expected = "at least one RPC client is required")]
+    fn builder_endpoints_append_in_order() {
+        let client = Client::builder()
+            .endpoint("http://127.0.0.1:1")
+            .endpoint("http://127.0.0.1:2")
+            .endpoints(&["http://127.0.0.1:3", "http://127.0.0.1:4"])
+            .build();
+        let addrs: Vec<_> = client
+            .endpoints()
+            .iter()
+            .map(|client| client.server_addr())
+            .collect();
+        assert_eq!(
+            addrs,
+            [
+                "http://127.0.0.1:1",
+                "http://127.0.0.1:2",
+                "http://127.0.0.1:3",
+                "http://127.0.0.1:4",
+            ]
+        );
+    }
+
+    #[test]
+    fn builder_clients_append_to_existing_endpoints() {
+        let client = Client::builder()
+            .endpoint("http://127.0.0.1:1")
+            .clients(vec![
+                jsonrpc_client("http://127.0.0.1:2"),
+                jsonrpc_client("http://127.0.0.1:3"),
+            ])
+            .build();
+        let addrs: Vec<_> = client
+            .endpoints()
+            .iter()
+            .map(|client| client.server_addr())
+            .collect();
+        assert_eq!(
+            addrs,
+            [
+                "http://127.0.0.1:1",
+                "http://127.0.0.1:2",
+                "http://127.0.0.1:3",
+            ]
+        );
+    }
+
+    #[test]
+    fn builder_retry_settings_are_stored_on_client() {
+        let client = Client::builder()
+            .endpoint("http://127.0.0.1:1")
+            .retry_backoff(Duration::from_millis(7))
+            .retries_per_endpoint(4)
+            .build();
+        assert_eq!(client.retry_backoff, Duration::from_millis(7));
+        assert_eq!(client.retries_per_endpoint, 4);
+    }
+
+    #[tokio::test]
+    async fn configured_retries_are_used_before_failover() {
+        let mut failing = Server::new_async().await;
+        let mut healthy = Server::new_async().await;
+        let failing_mock = timeout_mock_with_attempts(&mut failing, 2).await;
+        let healthy_mock = healthy_mock(&mut healthy).await;
+        let client = Client::builder()
+            .retry_backoff(Duration::ZERO)
+            .retries_per_endpoint(1)
+            .endpoints(&[failing.url().as_str(), healthy.url().as_str()])
+            .build();
+
+        // One retry plus the initial attempt on the failing endpoint, then failover.
+        assert!(client.send_query(&RpcHealthRequest).await.is_ok());
+        assert_eq!(client.current_endpoint_index(), 1);
+        failing_mock.assert_async().await;
+        healthy_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn zero_retries_makes_exactly_one_attempt() {
+        let mut server = Server::new_async().await;
+        let mock = timeout_mock_with_attempts(&mut server, 1).await;
+        let client = Client::builder()
+            .retry_backoff(Duration::ZERO)
+            .retries_per_endpoint(0)
+            .endpoint(&server.url())
+            .build();
+
+        // Zero retries means only the initial attempt; no failover to another
+        // endpoint is possible with a single configured endpoint.
+        assert!(client.send_query(&RpcHealthRequest).await.is_err());
+        assert_eq!(client.current_endpoint_index(), 0);
+        mock.assert_async().await;
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one RPC endpoint is required")]
+    fn builder_requires_an_endpoint() {
+        Client::builder().build();
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one RPC endpoint is required")]
+    fn empty_endpoints_are_rejected() {
+        Client::builder().endpoints(&[]).build();
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one RPC endpoint is required")]
     fn empty_clients_are_rejected() {
-        Client::from_clients(Vec::new());
+        Client::builder().clients(Vec::new()).build();
     }
 
     #[test]
@@ -1749,13 +1931,14 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body_from_request(move |_| {
                 let count = first_count.fetch_add(1, Ordering::SeqCst);
-                if count < RETRIES_PER_ENDPOINT {
+                if count < 3 {
+                    // Default: 2 retries plus the initial attempt.
                     error_body_for_first.as_bytes().to_vec()
                 } else {
                     jsonrpc_ok(serde_json::Value::Null)
                 }
             })
-            .expect_at_least(RETRIES_PER_ENDPOINT + 1)
+            .expect_at_least(4)
             .create_async()
             .await;
         let error_body_for_second = error_body.clone();
@@ -1771,11 +1954,13 @@ mod tests {
                     error_body_for_second.as_bytes().to_vec()
                 }
             })
-            .expect_at_least(RETRIES_PER_ENDPOINT + 1)
+            .expect_at_least(4)
             .create_async()
             .await;
 
-        let client = Client::new_with_endpoints(&[first.url().as_str(), second.url().as_str()]);
+        let client = Client::builder()
+            .endpoints(&[first.url().as_str(), second.url().as_str()])
+            .build();
         assert!(client.send_query(&RpcHealthRequest).await.is_ok());
         assert_eq!(client.current_endpoint_index(), 1);
 
@@ -1792,10 +1977,12 @@ mod tests {
         let mut second = Server::new_async().await;
         let failing_first = timeout_mock(&mut first).await;
         let failing_second = timeout_mock(&mut second).await;
-        let client = Client::from_clients(vec![
-            jsonrpc_client(&first.url()),
-            jsonrpc_client(&second.url()),
-        ]);
+        let client = Client::builder()
+            .clients(vec![
+                jsonrpc_client(&first.url()),
+                jsonrpc_client(&second.url()),
+            ])
+            .build();
 
         assert!(client.send_query(&RpcHealthRequest).await.is_err());
         assert_eq!(client.current_endpoint_index(), 1);
