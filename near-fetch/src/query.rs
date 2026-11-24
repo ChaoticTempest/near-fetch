@@ -148,7 +148,10 @@ where
         T::build_request(&self.inner, block_reference)
     }
 
-    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+    fn process_response(
+        &self,
+        resp: <Self::Method as RpcMethod>::Response,
+    ) -> Result<Self::Output> {
         T::process_response(&self.inner, resp).and_then(&self.map)
     }
 }
@@ -215,7 +218,8 @@ pub trait ProcessQuery {
     fn build_request(&self, block_ref: BlockReference) -> Result<Self::Method>;
 
     /// Convert the response from the RPC request to a type of our choosing.
-    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output>;
+    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response)
+        -> Result<Self::Output>;
 }
 
 #[derive(Clone)]
@@ -382,7 +386,10 @@ impl ProcessQuery for ViewState {
         })
     }
 
-    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+    fn process_response(
+        &self,
+        resp: <Self::Method as RpcMethod>::Response,
+    ) -> Result<Self::Output> {
         match resp.kind {
             QueryResponseKind::ViewState(state) => Ok(state),
             _ => Err(Error::RpcReturnedInvalidData("while querying state".into())),
@@ -422,7 +429,10 @@ impl ProcessQuery for ViewAccessKey {
         })
     }
 
-    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+    fn process_response(
+        &self,
+        resp: <Self::Method as RpcMethod>::Response,
+    ) -> Result<Self::Output> {
         match resp.kind {
             QueryResponseKind::AccessKey(key) => Ok(key),
             _ => Err(Error::RpcReturnedInvalidData(
@@ -447,7 +457,10 @@ impl ProcessQuery for ViewAccessKeyList {
         })
     }
 
-    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+    fn process_response(
+        &self,
+        resp: <Self::Method as RpcMethod>::Response,
+    ) -> Result<Self::Output> {
         match resp.kind {
             QueryResponseKind::AccessKeyList(keylist) => Ok(keylist),
             _ => Err(Error::RpcReturnedInvalidData(
@@ -478,7 +491,10 @@ impl ProcessQuery for GasPrice {
         Ok(Self::Method { block_id })
     }
 
-    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+    fn process_response(
+        &self,
+        resp: <Self::Method as RpcMethod>::Response,
+    ) -> Result<Self::Output> {
         Ok(resp.gas_price)
     }
 }
