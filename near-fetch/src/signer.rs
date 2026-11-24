@@ -164,7 +164,8 @@ pub trait SignerExt: ExposeAccountId + Send + Sync {
 
     /// Signs an [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md) off-chain
     /// message, widely used for authentication and proof of account ownership. This is
-    /// the same as signing the message's hash, and so is infallible.
+    /// the same as signing the message's hash: computing the hash is infallible, but
+    /// signing itself may panic (for example, [`Signer::Empty`]).
     fn sign_offchain(&self, message: &OffchainMessage) -> Signature {
         let hash = message.compute_hash();
         self.sign(hash.as_ref())
