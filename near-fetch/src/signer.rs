@@ -254,8 +254,11 @@ impl SignerExt for KeyRotatingSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::{
+        access_key_result_at_height, client_for_server, dummy_client, full_access,
+        in_memory_signer, jsonrpc_body,
+    };
     use near_crypto::KeyType;
-    use near_jsonrpc_client::JsonRpcClient;
 
     fn hex_to_hash(hex: &str) -> CryptoHash {
         let bytes = (0..hex.len())
@@ -319,17 +322,6 @@ mod tests {
         }
     }
 
-    fn in_memory_signer(account_id: &str) -> InMemorySigner {
-        let account_id: AccountId = account_id.parse().unwrap();
-        let secret_key = SecretKey::from_random(KeyType::ED25519);
-        let public_key = secret_key.public_key();
-        InMemorySigner {
-            account_id,
-            public_key,
-            secret_key,
-        }
-    }
-
     #[tokio::test]
     async fn verify_rejects_bad_signature_without_rpc() {
         let account_id: AccountId = "alice.near".parse().unwrap();
@@ -340,7 +332,7 @@ mod tests {
 
         // The client would fail if verify reached the RPC layer; a bad signature
         // must short-circuit to Ok(false) before any access-key lookup.
-        let client = Client::from_client(JsonRpcClient::new_client().connect("http://127.0.0.1:1"));
+        let client = dummy_client();
         let result = message
             .verify(
                 &account_id,
@@ -448,41 +440,23 @@ mod tests {
         assert!(signature.verify(b"signer bytes", &SignerExt::public_key(&wrapped)));
     }
 
-    fn access_key_body(permission: serde_json::Value) -> String {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "result": {
-                "nonce": 5,
-                "permission": permission,
-                "block_height": 7,
-                "block_hash": "11111111111111111111111111111111"
-            },
-            "id": 1
-        })
-        .to_string()
-    }
-
-    async fn verify_client(server: &mut mockito::Server) -> Client {
-        use near_jsonrpc_client::JsonRpcClient;
-
-        Client::from_client(JsonRpcClient::new_client().connect(server.url()))
-    }
-
     #[tokio::test]
     async fn verify_accepts_full_access_and_rejects_function_call_permission() {
-        let mut full_access = mockito::Server::new_async().await;
-        let full_mock = full_access
+        let mut full_access_server = mockito::Server::new_async().await;
+        let full_mock = full_access_server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(access_key_body(serde_json::Value::String(
-                "FullAccess".into(),
+            .with_body(jsonrpc_body(access_key_result_at_height(
+                5,
+                full_access(),
+                7,
             )))
             .expect(1)
             .create_async()
             .await;
 
-        let client = verify_client(&mut full_access).await;
+        let client = client_for_server(&full_access_server).await;
         let account_id: AccountId = "alice.near".parse().unwrap();
         let signer = in_memory_signer("alice.near");
         let message = sample_message();
@@ -512,12 +486,16 @@ mod tests {
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(access_key_body(function_call))
+            .with_body(jsonrpc_body(access_key_result_at_height(
+                5,
+                function_call,
+                7,
+            )))
             .expect(1)
             .create_async()
             .await;
 
-        let client = verify_client(&mut restricted).await;
+        let client = client_for_server(&restricted).await;
         assert!(
             !message
                 .verify(
@@ -542,7 +520,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = verify_client(&mut server).await;
+        let client = client_for_server(&server).await;
         let account_id: AccountId = "alice.near".parse().unwrap();
         let signer = in_memory_signer("alice.near");
         let message = sample_message();

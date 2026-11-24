@@ -723,6 +723,10 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::{
+        account, account_view, client_for_server, dummy_client, jsonrpc_ok, query_response,
+        wrong_kind_query_response,
+    };
 
     #[test]
     fn view_result_json() {
@@ -793,12 +797,6 @@ mod tests {
             block_height: 1,
             block_hash: CryptoHash::default(),
         }
-    }
-
-    fn dummy_client() -> Client {
-        Client::from_client(
-            near_jsonrpc_client::JsonRpcClient::new_client().connect("http://127.0.0.1:1"),
-        )
     }
 
     #[test]
@@ -891,41 +889,10 @@ mod tests {
     }
 
     use near_crypto::KeyType;
-    use near_jsonrpc_primitives::types::query::QueryResponseKind;
     use near_primitives::types::SyncCheckpoint;
     use near_primitives::views::{
         AccessKeyPermissionView, BlockHeaderView, ContractCodeView, GasPriceView,
     };
-
-    fn account(id: &str) -> AccountId {
-        id.parse().unwrap()
-    }
-
-    fn response(kind: QueryResponseKind) -> RpcQueryResponse {
-        RpcQueryResponse {
-            kind,
-            block_height: 9,
-            block_hash: CryptoHash::default(),
-        }
-    }
-
-    fn account_view() -> AccountView {
-        AccountView {
-            amount: near_token::NearToken::from_near(1),
-            locked: near_token::NearToken::ZERO,
-            code_hash: CryptoHash::default(),
-            storage_usage: 0,
-            storage_paid_at: 0,
-            global_contract_hash: None,
-            global_contract_account_id: None,
-            state: Default::default(),
-            bootstrap_nonce: None,
-        }
-    }
-
-    fn wrong_kind() -> QueryResponseKind {
-        QueryResponseKind::ViewAccount(account_view())
-    }
 
     fn invalid_data(err: Result<impl std::fmt::Debug>) {
         assert!(
@@ -1054,39 +1021,43 @@ mod tests {
             function: Function::new("get"),
         };
         let view_result = call
-            .process_response(response(QueryResponseKind::CallResult(CallResult {
+            .process_response(query_response(QueryResponseKind::CallResult(CallResult {
                 result: b"hi".to_vec(),
                 logs: vec!["log".into()],
             })))
             .unwrap();
         assert_eq!(view_result.result, b"hi");
         assert_eq!(view_result.logs, vec!["log"]);
-        invalid_data(call.process_response(response(wrong_kind())));
+        invalid_data(call.process_response(query_response(wrong_kind_query_response())));
 
         let code = ViewCode {
             account_id: account("c.near"),
         };
         let bytes = code
-            .process_response(response(QueryResponseKind::ViewCode(ContractCodeView {
-                code: vec![1, 2, 3],
-                hash: CryptoHash::default(),
-            })))
+            .process_response(query_response(QueryResponseKind::ViewCode(
+                ContractCodeView {
+                    code: vec![1, 2, 3],
+                    hash: CryptoHash::default(),
+                },
+            )))
             .unwrap();
         assert_eq!(bytes, vec![1, 2, 3]);
-        invalid_data(code.process_response(response(wrong_kind())));
+        invalid_data(code.process_response(query_response(wrong_kind_query_response())));
 
         let view_account = ViewAccount {
             account_id: account("c.near"),
         };
         assert_eq!(
             view_account
-                .process_response(response(QueryResponseKind::ViewAccount(account_view())))
+                .process_response(query_response(QueryResponseKind::ViewAccount(
+                    account_view()
+                )))
                 .unwrap()
                 .amount,
             near_token::NearToken::from_near(1)
         );
         invalid_data(
-            view_account.process_response(response(QueryResponseKind::CallResult(
+            view_account.process_response(query_response(QueryResponseKind::CallResult(
                 CallResult::default(),
             ))),
         );
@@ -1110,41 +1081,47 @@ mod tests {
             prefix: None,
         };
         let state_result = state
-            .process_response(response(QueryResponseKind::ViewState(ViewStateResult {
-                values: vec![],
-                proof: vec![],
-                last_key: None,
-            })))
+            .process_response(query_response(QueryResponseKind::ViewState(
+                ViewStateResult {
+                    values: vec![],
+                    proof: vec![],
+                    last_key: None,
+                },
+            )))
             .unwrap();
         assert!(state_result.values.is_empty());
-        invalid_data(state.process_response(response(wrong_kind())));
+        invalid_data(state.process_response(query_response(wrong_kind_query_response())));
 
         let key = ViewAccessKey {
             account_id: account("c.near"),
             public_key: PublicKey::empty(KeyType::ED25519),
         };
         assert_eq!(
-            key.process_response(response(QueryResponseKind::AccessKey(AccessKeyView {
-                nonce: 5,
-                permission: AccessKeyPermissionView::FullAccess,
-            })))
+            key.process_response(query_response(QueryResponseKind::AccessKey(
+                AccessKeyView {
+                    nonce: 5,
+                    permission: AccessKeyPermissionView::FullAccess,
+                }
+            )))
             .unwrap()
             .nonce,
             5
         );
-        invalid_data(key.process_response(response(wrong_kind())));
+        invalid_data(key.process_response(query_response(wrong_kind_query_response())));
 
         let keys = ViewAccessKeyList {
             account_id: account("c.near"),
         };
         let list = keys
-            .process_response(response(QueryResponseKind::AccessKeyList(AccessKeyList {
-                keys: vec![],
-                last_key: None,
-            })))
+            .process_response(query_response(QueryResponseKind::AccessKeyList(
+                AccessKeyList {
+                    keys: vec![],
+                    last_key: None,
+                },
+            )))
             .unwrap();
         assert!(list.keys.is_empty());
-        invalid_data(keys.process_response(response(wrong_kind())));
+        invalid_data(keys.process_response(query_response(wrong_kind_query_response())));
 
         let gas = GasPrice;
         assert_eq!(
@@ -1272,7 +1249,7 @@ mod tests {
     ) -> (
         mockito::ServerGuard,
         mockito::Mock,
-        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        crate::testkit::CapturedBodies,
     ) {
         let mut server = mockito::Server::new_async().await;
         let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1290,18 +1267,12 @@ mod tests {
                     Some("chunk") => chunk_result.clone(),
                     other => panic!("unexpected RPC method: {other:?}"),
                 };
-                serde_json::json!({"jsonrpc": "2.0", "result": result, "id": 1})
-                    .to_string()
-                    .into_bytes()
+                jsonrpc_ok(result)
             })
             .expect_at_least(1)
             .create_async()
             .await;
         (server, mock, bodies)
-    }
-
-    fn chunk_client(server: &mockito::ServerGuard) -> Client {
-        Client::from_client(near_jsonrpc_client::JsonRpcClient::new_client().connect(server.url()))
     }
 
     #[tokio::test]
@@ -1312,7 +1283,7 @@ mod tests {
             chunk_result(chunk_hash, ShardId::from(3)),
         )
         .await;
-        let client = chunk_client(&server);
+        let client = client_for_server(&server).await;
         let chunk: ChunkView = client.view_chunk().chunk_hash(chunk_hash).await.unwrap();
         assert_eq!(chunk.header.chunk_hash, chunk_hash);
 
@@ -1347,7 +1318,7 @@ mod tests {
             chunk_result(chunk_hash, ShardId::from(0)),
         )
         .await;
-        let client = chunk_client(&server);
+        let client = client_for_server(&server).await;
         let chunk: ChunkView = client.view_chunk().await.unwrap();
         assert_eq!(chunk.header.chunk_hash, chunk_hash);
         assert_eq!(chunk.header.shard_id, ShardId::from(0));

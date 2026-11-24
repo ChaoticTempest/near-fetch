@@ -101,27 +101,9 @@ mod tests {
 
     use base64::Engine as _;
     use base64::engine::general_purpose;
-    use near_jsonrpc_client::errors::{JsonRpcTransportRecvError, RpcTransportError};
-    use near_jsonrpc_primitives::message::Message;
-    use near_primitives::errors::InvalidTxError;
 
     use super::*;
-
-    fn transport_error<E>() -> JsonRpcError<E> {
-        JsonRpcError::TransportError(RpcTransportError::RecvError(
-            JsonRpcTransportRecvError::UnexpectedServerResponse(Box::new(Message::notification(
-                "test".into(),
-                serde_json::Value::Null,
-            ))),
-        ))
-    }
-
-    fn tx_execution_error() -> TxExecutionError {
-        TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce {
-            tx_nonce: 1,
-            ak_nonce: 2,
-        })
-    }
+    use crate::testkit::{invalid_nonce_tx_error, transport_error};
 
     #[derive(Debug)]
     struct SourceLeaf(&'static str);
@@ -211,7 +193,7 @@ mod tests {
                 "rpc: boom",
             ),
             (
-                Error::TxExecution(Box::new(tx_execution_error())),
+                Error::TxExecution(Box::new(invalid_nonce_tx_error())),
                 "must be larger",
             ),
             (Error::TxStatus("Started"), "tx_status=Started"),
@@ -267,7 +249,7 @@ mod tests {
             Error::PollTimeout(Duration::from_millis(5)),
             Error::RpcReturnedInvalidData("bad".into()),
             Error::Rpc(Box::new(std::io::Error::other("boom"))),
-            Error::TxExecution(Box::new(tx_execution_error())),
+            Error::TxExecution(Box::new(invalid_nonce_tx_error())),
             Error::TxStatus("Started"),
             Error::Serialization(serde_json::from_str::<u8>("x").unwrap_err()),
             Error::Base64(STANDARD.decode("!!!").unwrap_err()),

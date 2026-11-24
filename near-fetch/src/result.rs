@@ -353,49 +353,9 @@ impl Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_crypto::{KeyType, PublicKey, Signature};
-    use near_primitives::errors::{InvalidTxError, TxExecutionError};
-    use near_primitives::hash::CryptoHash;
-    use near_primitives::types::AccountId;
-    use near_primitives::views::ExecutionOutcomeView;
-    use near_token::NearToken;
+    use crate::testkit::{execution_outcome, invalid_nonce_tx_error, signed_transaction_view};
 
-    fn account(id: &str) -> AccountId {
-        id.parse().unwrap()
-    }
-
-    fn outcome(status: ExecutionStatusView, logs: &[&str], gas: u64) -> ExecutionOutcomeWithIdView {
-        ExecutionOutcomeWithIdView {
-            proof: vec![],
-            block_hash: CryptoHash::default(),
-            id: CryptoHash::default(),
-            outcome: ExecutionOutcomeView {
-                logs: logs.iter().map(|s| (*s).to_string()).collect(),
-                receipt_ids: vec![],
-                gas_burnt: Gas::from_gas(gas),
-                tokens_burnt: NearToken::from_yoctonear(0),
-                executor_id: account("alice.near"),
-                status,
-                metadata: Default::default(),
-            },
-        }
-    }
-
-    fn transaction() -> SignedTransactionView {
-        SignedTransactionView {
-            signer_id: account("alice.near"),
-            public_key: PublicKey::empty(KeyType::ED25519),
-            nonce: 1,
-            receiver_id: account("bob.near"),
-            actions: vec![],
-            _priority_fee: 0,
-            signature: Signature::from_parts(KeyType::ED25519, &[0u8; 64]).unwrap(),
-            hash: CryptoHash::default(),
-            nonce_index: None,
-            nonce_mode: None,
-        }
-    }
-
+    /// Build a final outcome with the log names and gas amounts asserted below.
     fn view(
         status: FinalExecutionStatus,
         transaction_status: ExecutionStatusView,
@@ -403,20 +363,13 @@ mod tests {
     ) -> FinalExecutionOutcomeView {
         FinalExecutionOutcomeView {
             status,
-            transaction: transaction(),
-            transaction_outcome: outcome(transaction_status, &["tx log"], 10),
+            transaction: signed_transaction_view(),
+            transaction_outcome: execution_outcome(transaction_status, &["tx log"], 10),
             receipts_outcome: receipts
                 .into_iter()
-                .map(|status| outcome(status, &["receipt log"], 5))
+                .map(|status| execution_outcome(status, &["receipt log"], 5))
                 .collect(),
         }
-    }
-
-    fn failure() -> TxExecutionError {
-        TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce {
-            tx_nonce: 1,
-            ak_nonce: 2,
-        })
     }
 
     fn success(bytes: &[u8]) -> ExecutionFinalResult {
@@ -446,8 +399,8 @@ mod tests {
     #[test]
     fn into_result_maps_failure_and_non_final_statuses() {
         let failed = ExecutionFinalResult::from_view(view(
-            FinalExecutionStatus::Failure(failure()),
-            ExecutionStatusView::Failure(failure()),
+            FinalExecutionStatus::Failure(invalid_nonce_tx_error()),
+            ExecutionStatusView::Failure(invalid_nonce_tx_error()),
             vec![],
         ));
         assert!(failed.is_failure());
@@ -500,9 +453,9 @@ mod tests {
     fn execution_final_result_delegates_to_details() {
         let result = ExecutionFinalResult::from_view(view(
             FinalExecutionStatus::SuccessValue(b"\"hello\"".to_vec()),
-            ExecutionStatusView::Failure(failure()),
+            ExecutionStatusView::Failure(invalid_nonce_tx_error()),
             vec![
-                ExecutionStatusView::Failure(failure()),
+                ExecutionStatusView::Failure(invalid_nonce_tx_error()),
                 ExecutionStatusView::SuccessValue(b"ok".to_vec()),
             ],
         ));
@@ -522,7 +475,7 @@ mod tests {
         let result = ExecutionFinalResult::from_view(view(
             FinalExecutionStatus::SuccessValue(serde_json::to_vec(&7u32).unwrap()),
             ExecutionStatusView::SuccessValue(b"ok".to_vec()),
-            vec![ExecutionStatusView::Failure(failure())],
+            vec![ExecutionStatusView::Failure(invalid_nonce_tx_error())],
         ));
         let success = result.into_result().unwrap();
 
