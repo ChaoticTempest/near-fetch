@@ -235,6 +235,7 @@ impl FunctionCallTransaction<'_> {
     /// the transaction has been completed or not. Note that `.await` will wait till completion
     /// of the transaction.
     pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
+        let sender_id = self.signer.account_id().clone();
         let hash = self
             .client
             .send_tx_async(
@@ -244,11 +245,7 @@ impl FunctionCallTransaction<'_> {
             )
             .await?;
 
-        Ok(AsyncTransactionStatus::new(
-            self.client,
-            self.receiver_id,
-            hash,
-        ))
+        Ok(AsyncTransactionStatus::new(self.client, sender_id, hash))
     }
 
     /// Retry this transaction if it fails, using exponential backoff with jitter.
@@ -325,16 +322,13 @@ impl<'a> Transaction<'a> {
     /// Send the transaction to the network to be processed. This will be done asynchronously
     /// without waiting for the transaction to complete.
     pub async fn transact_async(self) -> Result<AsyncTransactionStatus> {
+        let sender_id = self.signer.account_id().clone();
         let hash = self
             .client
             .send_tx_async(self.signer, &self.receiver_id, self.actions?)
             .await?;
 
-        Ok(AsyncTransactionStatus::new(
-            self.client,
-            self.receiver_id,
-            hash,
-        ))
+        Ok(AsyncTransactionStatus::new(self.client, sender_id, hash))
     }
 }
 
@@ -596,6 +590,7 @@ mod tests {
         assert_eq!(err.to_string(), message);
     }
 
+    use crate::signer::ExposeAccountId;
     use near_crypto::{InMemorySigner, KeyType, SecretKey};
     use near_primitives::account::{AccessKey, AccessKeyPermission};
 
@@ -934,9 +929,10 @@ mod tests {
             .transact_async()
             .await
             .unwrap();
-        // `transact_async` builds the status handle with the receiver id, so that is
-        // what the `sender_id` accessor currently reports.
-        assert_eq!(status.sender_id(), &receiver);
+        // The status handle must track the signer (transaction sender), not the
+        // receiver: outcome lookups and shard routing use the sender account id.
+        assert_eq!(status.sender_id(), signer.account_id());
+        assert_ne!(status.sender_id(), &receiver);
         assert_ne!(status.hash(), &CryptoHash::default());
         assert!(format!("{status:?}").contains("TransactionStatus"));
         assert!(matches!(status.status().await.unwrap(), Poll::Ready(_)));
