@@ -3,27 +3,6 @@
 Guidance for working in this repository. Every statement below was checked
 against the files and history in this checkout.
 
-## Workspace
-
-Root `Cargo.toml` declares a two-member workspace:
-
-```toml
-[workspace]
-members = ["near-fetch", "examples"]
-resolver = "3"
-```
-
-`near-fetch` is the published library; `examples` is an unpublished (`publish =
-false`) package that holds runnable examples and depends on the library by path.
-
-## Toolchain
-
-- Both crates use `edition = "2024"` and `rust-version = "1.95"` (`near-fetch/Cargo.toml`,
-  `examples/Cargo.toml`).
-- There is no `rust-toolchain` / `rust-toolchain.toml` file, so the active toolchain
-  is whatever is installed locally (1.96.0 in this checkout). Code must still
-  compile on the declared MSRV of 1.95.
-
 ## Commands
 
 The quality gate lives in the root `justfile`: `just ci` runs the full gate,
@@ -57,20 +36,6 @@ parallel jobs on pull requests and pushes to `main`: `quality` (`just ci`),
   `query.rs` (`map`, `and_then`), and one in `signer.rs` (`sign_offchain`). Four
   are marked `no_run`; the `sign_offchain` example actually executes.
 
-## Feature flags
-
-`near-fetch` has **no `cfg(feature)` gates in its own source**. All flags are
-pass-through entries for `near-jsonrpc-client` (declared with
-`default-features = false`):
-
-- `rustls-tls` — default; maps to `near-jsonrpc-client/rustls-tls`.
-- `native-tls` — alternative TLS backend; maps to `near-jsonrpc-client/native-tls`.
-- `any`, `sandbox`, `adversarial` — enable the corresponding extra RPC method
-  modules in `near-jsonrpc-client`.
-
-Do not add a `cfg(feature = ...)` branch in `near-fetch` without first changing
-this pattern and documenting it here.
-
 ## Architecture
 
 - `near-fetch/src/lib.rs` — the `Client` entry point: `new`, `new_with_endpoints`,
@@ -91,17 +56,8 @@ this pattern and documenting it here.
 
 ## Branch and PR workflow
 
-- Work is organized as stacked feature branches named `feat/*`, `test/*`,
-  `chore/*`, and `docs/*`. The local stack is ordered
-  `feat/nep413-signing` → `feat/rpc-failover` → `feat/query-combinators` →
-  `feat/retry-timeouts` → `chore/edition-2024` → `test/feature-coverage` →
-  `docs/rustdoc` → `docs/readme-agents`; each branch is an ancestor of the next
-  and PRs are merged bottom-up. Base a new branch on the tip of the stack it
-  extends.
 - Version-bump branches use `release/<version>` (for example `release/0.13`)
-  and version commits use `release: X` (for example `release: 0.13.0`). The
-  `0.13.0` bump exists only on `release/0.13`; the crate on this stack is
-  `0.12.0`.
+  and version commits use `release: X` (for example `release: 0.13.0`).
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, `test:`, `docs:`,
   `chore:`, `refactor:`, `style:`).
 
@@ -124,14 +80,6 @@ Release is created. Legacy tags such as `0.11.0` and `0.12` are never rewritten
 or deleted; `previous_tag` for the generated notes is simply the newest other
 tag by version sort. The workflow only runs on successful `push` runs of CI on
 `main` and never checks out or executes pull-request head code.
-
-## Lockfile
-
-`Cargo.lock` is gitignored (`.gitignore`, line 3) and must stay that way. A fresh
-clone resolves dependencies from scratch, so a build can pick up newer
-compatible patch versions than a previous one. Treat version-sensitive APIs
-(as listed under Gotchas) as pinned by their declared requirement, not by a
-committed lockfile.
 
 ## Gotchas
 

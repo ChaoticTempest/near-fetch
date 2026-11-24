@@ -1,4 +1,4 @@
-# near-fetch
+# NEAR Fetch
 
 `near-fetch` is a high-level async Rust client for the NEAR protocol. It wraps
 `near-jsonrpc-client` with retrying requests, automatic failover across RPC
@@ -6,27 +6,10 @@ endpoints, cached access-key nonces, and ergonomic builders for queries and
 transactions, so you can read chain state or submit signed transactions without
 assembling JSON-RPC requests by hand.
 
-> **Scope:** `near-fetch` concentrates on queries and transactions. It is not a
-> drop-in replacement for `near-jsonrpc-client` and does not expose every RPC
-> method the underlying client supports.
-
-## Status
-
-- Crate version: **0.12.0**
-- Edition: **2024**
-- Minimum supported Rust version (MSRV): **1.95**
-
 ## Installation
 
 ```sh
 cargo add near-fetch
-```
-
-Or add it to your `Cargo.toml`:
-
-```toml
-[dependencies]
-near-fetch = "0.12"
 ```
 
 ## Quick start
@@ -176,9 +159,8 @@ passed straight through to `near-jsonrpc-client`.
 
 To use the native TLS backend instead of the default:
 
-```toml
-[dependencies]
-near-fetch = { version = "0.12", default-features = false, features = ["native-tls"] }
+```sh
+cargo add near-fetch --no-default-features --features native-tls
 ```
 
 ## Examples
