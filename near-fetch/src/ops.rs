@@ -560,6 +560,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn function_clone_preserves_args() {
@@ -838,7 +839,11 @@ mod tests {
         .unwrap()
     }
 
-    async fn rpc_server(tx_result: serde_json::Value) -> (mockito::ServerGuard, mockito::Mock) {
+    type CapturedBodies = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+    async fn rpc_server(
+        tx_result: serde_json::Value,
+    ) -> (mockito::ServerGuard, mockito::Mock, CapturedBodies) {
         let mut server = mockito::Server::new_async().await;
         let block = serde_json::to_value(BlockView {
             author: "alice.near".parse().unwrap(),
@@ -846,6 +851,8 @@ mod tests {
             chunks: vec![],
         })
         .unwrap();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&bodies);
         let mock = server
             .mock("POST", "/")
             .with_status(200)
@@ -853,6 +860,7 @@ mod tests {
             .with_body_from_request(move |request| {
                 let body: serde_json::Value =
                     serde_json::from_slice(request.body().unwrap()).unwrap();
+                seen.lock().unwrap().push(body.clone());
                 match body["method"].as_str() {
                     Some("query") => jsonrpc_ok(serde_json::json!({
                         "nonce": 5,
@@ -867,7 +875,22 @@ mod tests {
             .expect_at_least(1)
             .create_async()
             .await;
-        (server, mock)
+        (server, mock, bodies)
+    }
+
+    /// The wire format for `tx` flattens `TransactionInfo`, so the sender is in
+    /// `params.sender_account_id` (not nested under a `transaction_info` key).
+    fn captured_tx_senders(bodies: &[serde_json::Value]) -> Vec<String> {
+        bodies
+            .iter()
+            .filter(|body| body["method"] == "tx")
+            .map(|body| {
+                body["params"]["sender_account_id"]
+                    .as_str()
+                    .expect("tx request must carry sender_account_id")
+                    .to_string()
+            })
+            .collect()
     }
 
     async fn server_client(server: &mockito::ServerGuard) -> Client {
@@ -880,7 +903,7 @@ mod tests {
             FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
             TxExecutionStatus::Final,
         );
-        let (server, _) = rpc_server(success).await;
+        let (server, _, _) = rpc_server(success).await;
         let client = server_client(&server).await;
         let signer = signer("alice.near");
         let receiver: AccountId = "bob.near".parse().unwrap();
@@ -909,7 +932,7 @@ mod tests {
             FinalExecutionStatus::SuccessValue(serde_json::to_vec(&7u32).unwrap()),
             TxExecutionStatus::Final,
         );
-        let (server, _) = rpc_server(success).await;
+        let (server, _, bodies) = rpc_server(success).await;
         let client = server_client(&server).await;
         let signer = signer("alice.near");
         let receiver: AccountId = "contract.near".parse().unwrap();
@@ -936,6 +959,12 @@ mod tests {
         assert_ne!(status.hash(), &CryptoHash::default());
         assert!(format!("{status:?}").contains("TransactionStatus"));
         assert!(matches!(status.status().await.unwrap(), Poll::Ready(_)));
+
+        // Assert what actually went over the wire: status lookups must use the
+        // signer account, never the contract being called.
+        let senders = captured_tx_senders(&bodies.lock().unwrap());
+        assert_eq!(senders, vec![signer.account_id().to_string()]);
+        assert!(senders.iter().all(|id| id != receiver.as_str()));
     }
 
     #[tokio::test]
@@ -944,7 +973,7 @@ mod tests {
             FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
             TxExecutionStatus::Final,
         );
-        let (server, _) = rpc_server(success).await;
+        let (server, _, bodies) = rpc_server(success).await;
         let client = server_client(&server).await;
         let signer = signer("alice.near");
         let receiver: AccountId = "bob.near".parse().unwrap();
@@ -966,6 +995,10 @@ mod tests {
             .transact_async()
             .await
             .unwrap();
+        // This is the second `sender_id` call site (`Transaction::transact_async`).
+        // Reverting it must fail this test even when the getter is read back.
+        assert_eq!(status.sender_id(), signer.account_id());
+        assert_ne!(status.sender_id(), &receiver);
         assert!(matches!(status.status().await.unwrap(), Poll::Ready(_)));
         assert!(status.clone().into_future().await.is_ok());
         assert!(
@@ -976,6 +1009,11 @@ mod tests {
                 .is_ok()
         );
         assert!(status.wait(Duration::ZERO).await.is_ok());
+
+        let senders = captured_tx_senders(&bodies.lock().unwrap());
+        assert_eq!(senders.len(), 4, "all four status lookups must be recorded");
+        assert!(senders.iter().all(|id| id == signer.account_id().as_str()));
+        assert!(senders.iter().all(|id| id != receiver.as_str()));
     }
 
     #[tokio::test]
@@ -984,7 +1022,7 @@ mod tests {
             FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
             TxExecutionStatus::Final,
         );
-        let (server, _) = rpc_server(success).await;
+        let (server, _, _) = rpc_server(success).await;
         let client = server_client(&server).await;
         let signer = signer("alice.near");
         let receiver: AccountId = "bob.near".parse().unwrap();
@@ -1106,15 +1144,89 @@ mod tests {
         ));
         mock.assert_async().await;
 
-        // TxExecutionError is propagated unchanged by status().
+        // A failed execution is surfaced as `Error::TxExecution` carrying the
+        // exact error reported by the node, not a freshly built placeholder.
         let tx_error = TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce {
             tx_nonce: 1,
             ak_nonce: 2,
         });
-        assert!(matches!(
-            Error::TxExecution(Box::new(tx_error)),
-            Error::TxExecution(_)
-        ));
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(jsonrpc_ok(tx_result(
+                FinalExecutionStatus::Failure(tx_error.clone()),
+                TxExecutionStatus::Final,
+            )))
+            .expect(1)
+            .create_async()
+            .await;
+        let status = AsyncTransactionStatus::new(
+            server_client(&server).await,
+            "alice.near".parse().unwrap(),
+            CryptoHash::default(),
+        );
+        let Poll::Ready(result) = status.status().await.unwrap() else {
+            panic!("expected a terminal status");
+        };
+        assert!(result.is_failure());
+        match result.into_result() {
+            Err(Error::TxExecution(reported)) => assert_eq!(*reported, tx_error),
+            other => panic!("unexpected status result: {other:?}"),
+        }
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn wait_polls_again_after_retryable_pending_status() {
+        let success = tx_result(
+            FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
+            TxExecutionStatus::Final,
+        );
+        let rpc_error: near_jsonrpc_primitives::errors::RpcError =
+            RpcTransactionError::UnknownTransaction {
+                requested_transaction_hash: CryptoHash::default(),
+            }
+            .into();
+        let pending = serde_json::json!({"jsonrpc": "2.0", "error": rpc_error, "id": 1})
+            .to_string()
+            .into_bytes();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |_| {
+                // The first `status()` call exhausts the retry budget on the
+                // retryable pending error; the following poll succeeds.
+                if counter.fetch_add(1, Ordering::SeqCst) < crate::RETRIES_PER_ENDPOINT {
+                    pending.clone()
+                } else {
+                    jsonrpc_ok(success.clone())
+                }
+            })
+            .expect(crate::RETRIES_PER_ENDPOINT + 1)
+            .create_async()
+            .await;
+        let status = AsyncTransactionStatus::new(
+            server_client(&server).await,
+            "alice.near".parse().unwrap(),
+            CryptoHash::default(),
+        );
+
+        let result = status.wait(Duration::ZERO).await.unwrap();
+        assert!(result.is_success());
+        assert_eq!(result.raw_bytes().unwrap(), b"ok");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            crate::RETRIES_PER_ENDPOINT + 1,
+            "wait() must poll more than once before returning Ready"
+        );
+        mock.assert_async().await;
     }
 }
 

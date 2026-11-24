@@ -691,6 +691,13 @@ mod tests {
         .unwrap()
     }
 
+    fn block_result_with_hash(hash: CryptoHash) -> serde_json::Value {
+        let mut block: BlockView = serde_json::from_value(block_result()).unwrap();
+        block.header.hash = hash;
+        block.header.height = 10;
+        serde_json::to_value(block).unwrap()
+    }
+
     fn wrong_kind_query_result() -> serde_json::Value {
         serde_json::json!({
             "result": [],
@@ -1214,12 +1221,33 @@ mod tests {
 
     #[tokio::test]
     async fn nonce_cache_hit_increments_and_refetches_block() {
-        let (server, mock) = method_server(
-            access_key_result(5, full_access()),
-            block_result(),
-            tx_pending_result(TxExecutionStatus::None),
-        )
-        .await;
+        let mut server = Server::new_async().await;
+        let block_calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&block_calls);
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                match body["method"].as_str() {
+                    Some("query") => jsonrpc_ok(access_key_result(5, full_access())),
+                    Some("block") => {
+                        // A different hash on every block request makes a stale
+                        // (cached) block hash observable.
+                        let call = counter.fetch_add(1, Ordering::SeqCst) as u8;
+                        jsonrpc_ok(block_result_with_hash(CryptoHash::hash_bytes(&[call])))
+                    }
+                    _ => jsonrpc_ok(serde_json::Value::Null),
+                }
+            })
+            .expect_at_least(3)
+            .create_async()
+            .await;
+        // The cache miss takes the block hash from the access-key query; each
+        // cache hit fetches a fresh block instead.
+        let expected_hashes: Vec<_> = (0..2).map(|n| CryptoHash::hash_bytes(&[n])).collect();
         let client = Client::from_client(jsonrpc_client(&server.url()));
         let account: AccountId = "alice.near".parse().unwrap();
         let signer = test_signer("alice.near");
@@ -1238,9 +1266,16 @@ mod tests {
                 .contains_key(&cache_key)
         );
 
-        // Cache hits increment the cached nonce and use the freshly fetched block.
-        assert_eq!(client.fetch_nonce(&account, &pk).await.unwrap().0, 7);
-        assert_eq!(client.fetch_nonce(&account, &pk).await.unwrap().0, 8);
+        // Cache hits increment the cached nonce but still fetch a fresh block.
+        assert_eq!(
+            client.fetch_nonce(&account, &pk).await.unwrap(),
+            (7, expected_hashes[0], 10)
+        );
+        assert_eq!(
+            client.fetch_nonce(&account, &pk).await.unwrap(),
+            (8, expected_hashes[1], 10)
+        );
+        assert_eq!(block_calls.load(Ordering::SeqCst), 2);
         mock.assert_async().await;
     }
 
@@ -1330,6 +1365,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delegate_action_invalid_nonce_in_outcome_invalidates_cache() {
+        let mut server = Server::new_async().await;
+        let access_nonce = Arc::new(AtomicU64::new(5));
+        let counter = Arc::clone(&access_nonce);
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                match body["method"].as_str() {
+                    // Jump by four so a refetch (nonce 9 -> 10) is
+                    // distinguishable from a mere cache increment (nonce 7).
+                    Some("query") => jsonrpc_ok(access_key_result(
+                        counter.fetch_add(4, Ordering::SeqCst),
+                        full_access(),
+                    )),
+                    Some("block") => jsonrpc_ok(block_result()),
+                    _ => jsonrpc_ok(serde_json::Value::Null),
+                }
+            })
+            .expect_at_least(2)
+            .create_async()
+            .await;
+
+        let client = Client::from_client(jsonrpc_client(&server.url()));
+        let account: AccountId = "alice.near".parse().unwrap();
+        let pk = SignerExt::public_key(&test_signer("alice.near"));
+        let cache_key = (account.clone(), pk.clone());
+        assert_eq!(client.fetch_nonce(&account, &pk).await.unwrap().0, 6);
+
+        let delegate_invalid = TxExecutionError::ActionError(ActionError {
+            index: Some(0),
+            kind: ActionErrorKind::DelegateActionInvalidNonce {
+                delegate_nonce: 6,
+                ak_nonce: 5,
+            },
+        });
+        let response = RpcTransactionResponse {
+            final_execution_outcome: Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(
+                outcome(
+                    FinalExecutionStatus::SuccessValue(Vec::new()),
+                    ExecutionStatusView::SuccessValue(Vec::new()),
+                    vec![ExecutionStatusView::Failure(delegate_invalid)],
+                ),
+            )),
+            final_execution_status: TxExecutionStatus::Final,
+        };
+        client
+            .check_and_invalidate_cache(&cache_key, &Ok(response))
+            .await;
+        assert_eq!(client.fetch_nonce(&account, &pk).await.unwrap().0, 10);
+
+        // An unrelated action error must leave the freshly cached nonce intact.
+        let unrelated = TxExecutionError::ActionError(ActionError {
+            index: None,
+            kind: ActionErrorKind::DelegateActionNonceTooLarge {
+                delegate_nonce: 10,
+                upper_bound: 5,
+            },
+        });
+        let response = RpcTransactionResponse {
+            final_execution_outcome: Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(
+                outcome(
+                    FinalExecutionStatus::SuccessValue(Vec::new()),
+                    ExecutionStatusView::SuccessValue(Vec::new()),
+                    vec![ExecutionStatusView::Failure(unrelated)],
+                ),
+            )),
+            final_execution_status: TxExecutionStatus::Final,
+        };
+        client
+            .check_and_invalidate_cache(&cache_key, &Ok(response))
+            .await;
+        assert_eq!(client.fetch_nonce(&account, &pk).await.unwrap().0, 11);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn fetch_tx_errs_collects_all_failure_sources() {
         let empty = RpcTransactionResponse {
             final_execution_outcome: None,
@@ -1403,17 +1518,33 @@ mod tests {
 
     #[tokio::test]
     async fn send_tx_once_signs_and_returns_outcome() {
-        let (server, _) = method_server(
-            access_key_result(5, full_access()),
-            block_result(),
-            tx_result(
-                FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
-                ExecutionStatusView::SuccessValue(b"ok".to_vec()),
-                vec![],
-                TxExecutionStatus::Final,
-            ),
-        )
-        .await;
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&bodies);
+        let outcome = tx_result(
+            FinalExecutionStatus::SuccessValue(b"ok".to_vec()),
+            ExecutionStatusView::SuccessValue(b"ok".to_vec()),
+            vec![],
+            TxExecutionStatus::Final,
+        );
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                seen.lock().unwrap().push(body.clone());
+                match body["method"].as_str() {
+                    Some("query") => jsonrpc_ok(access_key_result(5, full_access())),
+                    Some("block") => jsonrpc_ok(block_result()),
+                    Some("send_tx") => jsonrpc_ok(outcome.clone()),
+                    other => panic!("unexpected RPC method: {other:?}"),
+                }
+            })
+            .expect_at_least(1)
+            .create_async()
+            .await;
         let client = Client::from_client(jsonrpc_client(&server.url()));
         let signer = test_signer("alice.near");
         let receiver: AccountId = "bob.near".parse().unwrap();
@@ -1425,6 +1556,29 @@ mod tests {
             outcome.status,
             FinalExecutionStatus::SuccessValue(b"ok".to_vec())
         );
+
+        // Assert the signed transaction on the wire, not just the returned value.
+        {
+            let sent_bodies = bodies.lock().unwrap();
+            let send_tx = sent_bodies
+                .iter()
+                .find(|body| body["method"] == "send_tx")
+                .expect("send_tx request must be captured");
+            let encoded = send_tx["params"]["signed_tx_base64"]
+                .as_str()
+                .expect("send_tx must carry a base64 signed transaction");
+            let bytes = near_primitives::serialize::from_base64(encoded).unwrap();
+            let signed: SignedTransaction = borsh::from_slice(&bytes).unwrap();
+            match signed.transaction {
+                Transaction::V0(tx) => {
+                    assert_eq!(tx.receiver_id, receiver);
+                    assert_eq!(&tx.signer_id, signer.account_id());
+                    assert_ne!(tx.nonce, 0, "the signed transaction must carry a nonce");
+                }
+                other => panic!("unexpected transaction shape: {other:?}"),
+            }
+        }
+        mock.assert_async().await;
     }
 
     #[tokio::test]

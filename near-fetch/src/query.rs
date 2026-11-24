@@ -1226,4 +1226,145 @@ mod tests {
 
         assert_eq!(client.gas_price().client.rpc_addr(), client.rpc_addr());
     }
+
+    fn chunk_result(hash: CryptoHash, shard_id: ShardId) -> serde_json::Value {
+        let hash = serde_json::to_value(hash).unwrap();
+        let signature = serde_json::to_value(
+            near_crypto::Signature::from_parts(KeyType::ED25519, &[0u8; 64]).unwrap(),
+        )
+        .unwrap();
+        serde_json::json!({
+            "author": "alice.near",
+            "header": {
+                "chunk_hash": hash,
+                "prev_block_hash": hash,
+                "outcome_root": hash,
+                "prev_state_root": hash,
+                "encoded_merkle_root": hash,
+                "encoded_length": 0,
+                "height_created": 1,
+                "height_included": 1,
+                "shard_id": shard_id,
+                "gas_used": "0",
+                "gas_limit": "1000000000000",
+                "rent_paid": "0",
+                "validator_reward": "0",
+                "balance_burnt": "0",
+                "outgoing_receipts_root": hash,
+                "tx_root": hash,
+                "validator_proposals": [],
+                "congestion_info": null,
+                "bandwidth_requests": null,
+                "signature": signature,
+            },
+            "transactions": [],
+            "receipts": [],
+        })
+    }
+
+    async fn chunk_server(
+        block_result: serde_json::Value,
+        chunk_result: serde_json::Value,
+    ) -> (
+        mockito::ServerGuard,
+        mockito::Mock,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let mut server = mockito::Server::new_async().await;
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = std::sync::Arc::clone(&bodies);
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                seen.lock().unwrap().push(body.clone());
+                let result = match body["method"].as_str() {
+                    Some("block") => block_result.clone(),
+                    Some("chunk") => chunk_result.clone(),
+                    other => panic!("unexpected RPC method: {other:?}"),
+                };
+                serde_json::json!({"jsonrpc": "2.0", "result": result, "id": 1})
+                    .to_string()
+                    .into_bytes()
+            })
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        (server, mock, bodies)
+    }
+
+    fn chunk_client(server: &mockito::ServerGuard) -> Client {
+        Client::from_client(near_jsonrpc_client::JsonRpcClient::new_client().connect(server.url()))
+    }
+
+    #[tokio::test]
+    async fn view_chunk_with_explicit_chunk_hash_skips_block_lookup() {
+        let chunk_hash = CryptoHash::hash_bytes(b"explicit chunk");
+        let (server, mock, bodies) = chunk_server(
+            serde_json::Value::Null,
+            chunk_result(chunk_hash, ShardId::from(3)),
+        )
+        .await;
+        let client = chunk_client(&server);
+        let chunk: ChunkView = client.view_chunk().chunk_hash(chunk_hash).await.unwrap();
+        assert_eq!(chunk.header.chunk_hash, chunk_hash);
+
+        {
+            let sent = bodies.lock().unwrap();
+            let methods: Vec<_> = sent
+                .iter()
+                .map(|body| body["method"].as_str().unwrap())
+                .collect();
+            assert_eq!(methods, vec!["chunk"]);
+            assert_eq!(
+                sent[0]["params"]["chunk_id"],
+                serde_json::to_value(chunk_hash).unwrap()
+            );
+            assert!(sent[0]["params"].get("block_id").is_none());
+        }
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn view_chunk_defaults_to_latest_block_and_shard_zero() {
+        let block_hash = CryptoHash::hash_bytes(b"latest block");
+        let mut block_view = BlockView {
+            author: account("alice.near"),
+            header: BlockHeaderView::default(),
+            chunks: vec![],
+        };
+        block_view.header.hash = block_hash;
+        let chunk_hash = CryptoHash::hash_bytes(b"default chunk");
+        let (server, mock, bodies) = chunk_server(
+            serde_json::to_value(block_view).unwrap(),
+            chunk_result(chunk_hash, ShardId::from(0)),
+        )
+        .await;
+        let client = chunk_client(&server);
+        let chunk: ChunkView = client.view_chunk().await.unwrap();
+        assert_eq!(chunk.header.chunk_hash, chunk_hash);
+        assert_eq!(chunk.header.shard_id, ShardId::from(0));
+
+        {
+            let sent = bodies.lock().unwrap();
+            let methods: Vec<_> = sent
+                .iter()
+                .map(|body| body["method"].as_str().unwrap())
+                .collect();
+            assert_eq!(methods, vec!["block", "chunk"]);
+            assert_eq!(
+                sent[1]["params"]["block_id"],
+                serde_json::to_value(block_hash).unwrap()
+            );
+            assert_eq!(
+                sent[1]["params"]["shard_id"],
+                serde_json::to_value(ShardId::from(0)).unwrap()
+            );
+            assert!(sent[1]["params"].get("chunk_id").is_none());
+        }
+        mock.assert_async().await;
+    }
 }
