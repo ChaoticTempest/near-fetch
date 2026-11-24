@@ -1,5 +1,7 @@
 //! Error and result types used throughout `near-fetch`.
 
+use std::time::Duration;
+
 use near_jsonrpc_client::errors::JsonRpcError;
 use near_jsonrpc_client::methods::broadcast_tx_async::RpcBroadcastTxAsyncError;
 use near_jsonrpc_primitives::types::blocks::RpcBlockError;
@@ -33,6 +35,9 @@ pub enum Error {
     /// The submitted transaction has not completed yet.
     #[error("transaction has not completed yet")]
     RpcTransactionPending,
+    /// The transaction did not complete within the configured polling timeout.
+    #[error("timed out waiting for transaction after {0:?}")]
+    PollTimeout(Duration),
     /// The RPC returned data that could not be interpreted in the expected form.
     #[error("invalid data returned: {0}")]
     RpcReturnedInvalidData(String),
@@ -194,6 +199,10 @@ mod tests {
                 "transaction has not completed yet",
             ),
             (
+                Error::PollTimeout(Duration::from_millis(5)),
+                "timed out waiting for transaction after 5ms",
+            ),
+            (
                 Error::RpcReturnedInvalidData("bad payload".into()),
                 "invalid data returned: bad payload",
             ),
@@ -255,6 +264,7 @@ mod tests {
             Error::from(transport_error::<RpcTransactionError>()),
             Error::from(transport_error::<RpcBroadcastTxAsyncError>()),
             Error::RpcTransactionPending,
+            Error::PollTimeout(Duration::from_millis(5)),
             Error::RpcReturnedInvalidData("bad".into()),
             Error::Rpc(Box::new(std::io::Error::other("boom"))),
             Error::TxExecution(Box::new(tx_execution_error())),

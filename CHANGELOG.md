@@ -49,6 +49,10 @@ is based on Keep a Changelog, and this project adheres to Semantic Versioning.
   `clients`, `retry_backoff` and `retries_per_endpoint`, plus the `endpoints`,
   `current_endpoint` and `current_endpoint_index` accessors, with per-endpoint
   retry and failover.
+- Client builder knobs for timeouts: `request_timeout` (30 s per RPC attempt),
+  `poll_interval` (300 ms between async status polls) and `poll_timeout`
+  (`None`, no polling deadline, by default). Exceeding the polling deadline
+  returns the new `Error::PollTimeout`.
 - `map` and `and_then` combinators on the query builders.
 - NEP-413 off-chain message signing (#38): `OffchainMessage`,
   `SignerExt::sign_offchain` and `OffchainMessage::verify`.
@@ -59,6 +63,9 @@ is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
 ### Changed
 
+- Hung RPCs now time out after 30 s per attempt by default; the timeout is
+  retryable, so a stalled endpoint is retried and failed over instead of
+  blocking the call forever.
 - Upgraded the `near-*` dependencies to 0.38, `near-jsonrpc-client` to 0.23,
   `near-account-id` to 3 and `near-token` to 0.3.6 (#37).
 - Pinned `tokio-retry` to 0.3.2 and moved RPC retries to the non-deprecated
