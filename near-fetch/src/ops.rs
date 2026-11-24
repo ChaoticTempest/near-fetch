@@ -1086,8 +1086,9 @@ mod tests {
                 .with_status(200)
                 .with_header("content-type", "application/json")
                 .with_body(body)
-                // UnknownTransaction and TimeoutError are retryable status errors.
-                .expect(crate::RETRIES_PER_ENDPOINT)
+                // UnknownTransaction and TimeoutError are retryable status errors;
+                // the default budget is 2 retries plus the initial attempt.
+                .expect(3)
                 .create_async()
                 .await;
             let client = server_client(&server).await;
@@ -1209,13 +1210,13 @@ mod tests {
             .with_body_from_request(move |_| {
                 // The first `status()` call exhausts the retry budget on the
                 // retryable pending error; the following poll succeeds.
-                if counter.fetch_add(1, Ordering::SeqCst) < crate::RETRIES_PER_ENDPOINT {
+                if counter.fetch_add(1, Ordering::SeqCst) < 3 {
                     pending.clone()
                 } else {
                     jsonrpc_ok(success.clone())
                 }
             })
-            .expect(crate::RETRIES_PER_ENDPOINT + 1)
+            .expect(4)
             .create_async()
             .await;
         let status = AsyncTransactionStatus::new(
@@ -1229,7 +1230,7 @@ mod tests {
         assert_eq!(result.raw_bytes().unwrap(), b"ok");
         assert_eq!(
             attempts.load(Ordering::SeqCst),
-            crate::RETRIES_PER_ENDPOINT + 1,
+            4,
             "wait() must poll more than once before returning Ready"
         );
         mock.assert_async().await;

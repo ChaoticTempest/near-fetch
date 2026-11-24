@@ -12,6 +12,10 @@ is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
 ### Breaking changes
 
+- **`new_with_endpoints` and `from_clients` were replaced by `Client::builder()`.**
+  Use `Client::builder().endpoints(&[...]).build()` and
+  `Client::builder().clients(clients).build()`, respectively. `Client::new`
+  and `Client::from_client` remain available.
 - **`ProcessQuery` trait methods renamed and now borrow `self`.**
   - Before: `into_request(self, block_ref)` / `from_response(resp)`.
   - After: `build_request(&self, block_ref)` / `process_response(&self, resp)`.
@@ -41,9 +45,10 @@ is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
 ### Added
 
-- Multi-endpoint support: `Client::new_with_endpoints`, `Client::from_clients`,
-  and the `endpoints`, `current_endpoint` and `current_endpoint_index`
-  accessors, with per-endpoint retry and failover.
+- Multi-endpoint support: `Client::builder()` with `endpoint`, `endpoints`,
+  `clients`, `retry_backoff` and `retries_per_endpoint`, plus the `endpoints`,
+  `current_endpoint` and `current_endpoint_index` accessors, with per-endpoint
+  retry and failover.
 - `map` and `and_then` combinators on the query builders.
 - NEP-413 off-chain message signing (#38): `OffchainMessage`,
   `SignerExt::sign_offchain` and `OffchainMessage::verify`.
