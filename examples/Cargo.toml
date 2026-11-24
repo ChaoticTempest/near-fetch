@@ -8,10 +8,10 @@ edition = "2021"
 anyhow = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-near-account-id = "2"
-near-crypto = "0.37"
+near-account-id = "3"
+near-crypto = "0.38"
 near-fetch = { path = "../near-fetch" }
-near-primitives = "0.37"
+near-primitives = "0.38"
 
 [[example]]
 name = "various_views"
