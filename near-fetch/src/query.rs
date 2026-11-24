@@ -144,12 +144,12 @@ where
     type Method = T::Method;
     type Output = U;
 
-    fn into_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
-        T::into_request(&self.inner, block_reference)
+    fn build_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
+        T::build_request(&self.inner, block_reference)
     }
 
-    fn from_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
-        T::from_response(&self.inner, resp).and_then(&self.map)
+    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+        T::process_response(&self.inner, resp).and_then(&self.map)
     }
 }
 
@@ -190,11 +190,11 @@ where
             let block_reference = self.block_ref.unwrap_or_else(BlockReference::latest);
             let resp = self
                 .client
-                .send_query(&self.method.into_request(block_reference)?)
+                .send_query(&self.method.build_request(block_reference)?)
                 .await
                 .map_err(|err| Error::Rpc(err.into()))?;
 
-            self.method.from_response(resp)
+            self.method.process_response(resp)
         })
     }
 }
@@ -202,7 +202,6 @@ where
 // Note: this trait is exposed publicly due to constraining with the impl offering `finality`.
 /// Trait used as a high level APIs for consistent usages of block reference. Mostly used
 /// internally to facilitate syntax sugar for performing RPC requests with async builders.
-#[allow(clippy::wrong_self_convention)]
 pub trait ProcessQuery {
     // TODO: associated default type is unstable. So for now, will require writing
     // the manual impls for query_request
@@ -213,10 +212,10 @@ pub trait ProcessQuery {
     type Output;
 
     /// Convert into the Request object that is required to perform the RPC request.
-    fn into_request(&self, block_ref: BlockReference) -> Result<Self::Method>;
+    fn build_request(&self, block_ref: BlockReference) -> Result<Self::Method>;
 
     /// Convert the response from the RPC request to a type of our choosing.
-    fn from_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output>;
+    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output>;
 }
 
 #[derive(Clone)]
@@ -262,7 +261,7 @@ impl ProcessQuery for ViewFunction {
     type Method = methods::query::RpcQueryRequest;
     type Output = ViewResult;
 
-    fn into_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
+    fn build_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
         Ok(Self::Method {
             block_reference,
             request: QueryRequest::CallFunction {
@@ -273,7 +272,7 @@ impl ProcessQuery for ViewFunction {
         })
     }
 
-    fn from_response(&self, resp: RpcQueryResponse) -> Result<Self::Output> {
+    fn process_response(&self, resp: RpcQueryResponse) -> Result<Self::Output> {
         match resp.kind {
             QueryResponseKind::CallResult(result) => Ok(result.into()),
             _ => Err(Error::RpcReturnedInvalidData(
@@ -313,7 +312,7 @@ impl ProcessQuery for ViewCode {
     type Method = methods::query::RpcQueryRequest;
     type Output = Vec<u8>;
 
-    fn into_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
+    fn build_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
         Ok(Self::Method {
             block_reference,
             request: QueryRequest::ViewCode {
@@ -322,7 +321,7 @@ impl ProcessQuery for ViewCode {
         })
     }
 
-    fn from_response(&self, resp: RpcQueryResponse) -> Result<Self::Output> {
+    fn process_response(&self, resp: RpcQueryResponse) -> Result<Self::Output> {
         match resp.kind {
             QueryResponseKind::ViewCode(contract) => Ok(contract.code),
             _ => Err(Error::RpcReturnedInvalidData("while querying code".into())),
@@ -334,7 +333,7 @@ impl ProcessQuery for ViewAccount {
     type Method = methods::query::RpcQueryRequest;
     type Output = AccountView;
 
-    fn into_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
+    fn build_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
         Ok(Self::Method {
             block_reference,
             request: QueryRequest::ViewAccount {
@@ -343,7 +342,7 @@ impl ProcessQuery for ViewAccount {
         })
     }
 
-    fn from_response(&self, resp: RpcQueryResponse) -> Result<Self::Output> {
+    fn process_response(&self, resp: RpcQueryResponse) -> Result<Self::Output> {
         match resp.kind {
             QueryResponseKind::ViewAccount(account) => Ok(account),
             _ => Err(Error::RpcReturnedInvalidData(
@@ -357,11 +356,11 @@ impl ProcessQuery for ViewBlock {
     type Method = methods::block::RpcBlockRequest;
     type Output = BlockView;
 
-    fn into_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
+    fn build_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
         Ok(Self::Method { block_reference })
     }
 
-    fn from_response(&self, view: BlockView) -> Result<Self::Output> {
+    fn process_response(&self, view: BlockView) -> Result<Self::Output> {
         Ok(view)
     }
 }
@@ -370,7 +369,7 @@ impl ProcessQuery for ViewState {
     type Method = methods::query::RpcQueryRequest;
     type Output = ViewStateResult;
 
-    fn into_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
+    fn build_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
         Ok(Self::Method {
             block_reference,
             request: QueryRequest::ViewState {
@@ -383,7 +382,7 @@ impl ProcessQuery for ViewState {
         })
     }
 
-    fn from_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
         match resp.kind {
             QueryResponseKind::ViewState(state) => Ok(state),
             _ => Err(Error::RpcReturnedInvalidData("while querying state".into())),
@@ -413,7 +412,7 @@ impl ProcessQuery for ViewAccessKey {
     type Method = methods::query::RpcQueryRequest;
     type Output = AccessKeyView;
 
-    fn into_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
+    fn build_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
         Ok(Self::Method {
             block_reference,
             request: QueryRequest::ViewAccessKey {
@@ -423,7 +422,7 @@ impl ProcessQuery for ViewAccessKey {
         })
     }
 
-    fn from_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
         match resp.kind {
             QueryResponseKind::AccessKey(key) => Ok(key),
             _ => Err(Error::RpcReturnedInvalidData(
@@ -437,7 +436,7 @@ impl ProcessQuery for ViewAccessKeyList {
     type Method = methods::query::RpcQueryRequest;
     type Output = AccessKeyList;
 
-    fn into_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
+    fn build_request(&self, block_reference: BlockReference) -> Result<Self::Method> {
         Ok(Self::Method {
             block_reference,
             request: QueryRequest::ViewAccessKeyList {
@@ -448,7 +447,7 @@ impl ProcessQuery for ViewAccessKeyList {
         })
     }
 
-    fn from_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
         match resp.kind {
             QueryResponseKind::AccessKeyList(keylist) => Ok(keylist),
             _ => Err(Error::RpcReturnedInvalidData(
@@ -462,7 +461,7 @@ impl ProcessQuery for GasPrice {
     type Method = methods::gas_price::RpcGasPriceRequest;
     type Output = NearToken;
 
-    fn into_request(&self, block_ref: BlockReference) -> Result<Self::Method> {
+    fn build_request(&self, block_ref: BlockReference) -> Result<Self::Method> {
         let block_id = match block_ref {
             // User provided input via `block_hash` or `block_height` functions.
             BlockReference::BlockId(block_id) => Some(block_id),
@@ -479,7 +478,7 @@ impl ProcessQuery for GasPrice {
         Ok(Self::Method { block_id })
     }
 
-    fn from_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
+    fn process_response(&self, resp: <Self::Method as RpcMethod>::Response) -> Result<Self::Output> {
         Ok(resp.gas_price)
     }
 }
