@@ -159,7 +159,7 @@ impl Client {
                 self.current_endpoint_idx.store(idx, Ordering::SeqCst);
             }
             let strategy = FixedInterval::new(RETRY_BACKOFF).take(RETRIES_PER_ENDPOINT - 1);
-            let retry = RetryIf::spawn(
+            let retry = RetryIf::start(
                 strategy,
                 || client.call(method),
                 |err: &JsonRpcError<M::Error>| !is_critical(err),
