@@ -1,12 +1,12 @@
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use near_jsonrpc_client::methods::tx::RpcTransactionResponse;
 use tokio::sync::RwLock;
-use tokio_retry::{strategy::FixedInterval, RetryIf};
+use tokio_retry::{RetryIf, strategy::FixedInterval};
 
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
@@ -14,7 +14,7 @@ use near_jsonrpc_client::errors::{
     JsonRpcError, JsonRpcServerError, JsonRpcServerResponseStatusError,
 };
 use near_jsonrpc_client::methods::query::RpcQueryRequest;
-use near_jsonrpc_client::{methods, JsonRpcClient, MethodCallResult};
+use near_jsonrpc_client::{JsonRpcClient, MethodCallResult, methods};
 use near_jsonrpc_primitives::types::query::{QueryResponseKind, RpcQueryError};
 use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::errors::{ActionError, ActionErrorKind, InvalidTxError, TxExecutionError};

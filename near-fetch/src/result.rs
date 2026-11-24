@@ -7,10 +7,10 @@ use near_primitives::views::{
     FinalExecutionStatus, SignedTransactionView,
 };
 
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 
-use crate::error::Result;
 use crate::Error;
+use crate::error::Result;
 
 /// Execution related info as a result of performing a successful transaction
 /// execution on the network. This value can be converted into the returned

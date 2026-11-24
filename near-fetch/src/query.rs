@@ -216,7 +216,7 @@ pub trait ProcessQuery {
 
     /// Convert the response from the RPC request to a type of our choosing.
     fn process_response(&self, resp: <Self::Method as RpcMethod>::Response)
-        -> Result<Self::Output>;
+    -> Result<Self::Output>;
 }
 
 #[derive(Clone)]
@@ -481,7 +481,7 @@ impl ProcessQuery for GasPrice {
             BlockReference::SyncCheckpoint(point) => {
                 return Err(Error::RpcReturnedInvalidData(format!(
                     "Cannot supply sync checkpoint to gas price: {point:?}. Potential API bug?"
-                )))
+                )));
             }
         };
 
