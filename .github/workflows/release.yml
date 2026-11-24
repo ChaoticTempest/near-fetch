@@ -64,7 +64,15 @@ jobs:
         run: |
           set -euo pipefail
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            echo "Tag ${TAG} already exists; reusing it."
+            # A stale or manually created tag for the same version must never
+            # be reused to publish a Release keyed to a different commit.
+            TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+            HEAD_COMMIT="$(git rev-parse HEAD)"
+            if [[ "$TAG_COMMIT" != "$HEAD_COMMIT" ]]; then
+              echo "::error::Tag ${TAG} exists but points at ${TAG_COMMIT}, not the released commit ${HEAD_COMMIT}. Refusing to publish a Release for the wrong commit."
+              exit 1
+            fi
+            echo "Tag ${TAG} already exists and points at HEAD (${HEAD_COMMIT}); reusing it."
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -72,6 +80,8 @@ jobs:
             git push origin "refs/tags/${TAG}"
             echo "Created and pushed annotated tag ${TAG}."
           fi
+          # Only set the flag when the tag exists AND points at the released
+          # commit (a freshly created tag does by construction).
           echo "tag_exists=true" >> "$GITHUB_OUTPUT"
 
       - name: Derive previous tag
@@ -92,19 +102,28 @@ jobs:
 
       # The tag may already exist from a run that pushed it but failed before
       # creating the Release. Always check GitHub before creating one so reruns
-      # recover from that partial failure without producing duplicates.
-      - name: Check for an existing GitHub Release
+      # recover from that partial failure without producing duplicates. Drafts
+      # do not count: `gh release view` matches them too, and a draft left by a
+      # failed run would otherwise make every rerun skip forever.
+      - name: Check for a published GitHub Release
         id: release_check
         if: steps.tag.outputs.tag_exists == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release for ${TAG} already exists; skipping creation."
+          # Treat command failure (no release at all) and isDraft == true as
+          # "no published release" so the Release step can recover.
+          is_draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null || true)"
+          if [[ "$is_draft" == "false" ]]; then
+            echo "Published release for ${TAG} already exists; skipping creation."
             echo "release_exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No release for ${TAG} found; will create one."
+            if [[ "$is_draft" == "true" ]]; then
+              echo "Draft release for ${TAG} exists; it will be published by the Release step."
+            else
+              echo "No release for ${TAG} found; will create one."
+            fi
             echo "release_exists=false" >> "$GITHUB_OUTPUT"
           fi
 
