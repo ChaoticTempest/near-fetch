@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,6 +55,9 @@ pub struct Client {
     rpc_endpoints: Vec<JsonRpcClient>,
     /// AccessKey nonces to reference when sending transactions.
     access_key_nonces: Arc<RwLock<HashMap<CacheKey, AtomicU64>>>,
+    /// Index of the most recently selected RPC endpoint. Shared across clones so
+    /// that all clones of a client fail over together.
+    current_endpoint_idx: Arc<AtomicUsize>,
 }
 
 impl Client {
@@ -89,17 +92,21 @@ impl Client {
         Self {
             rpc_endpoints: clients,
             access_key_nonces: Arc::new(RwLock::new(HashMap::new())),
+            current_endpoint_idx: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    /// Internal reference to the primary [`JsonRpcClient`] that is utilized for all RPC calls.
+    /// Internal reference to the most recently selected [`JsonRpcClient`] used for RPC calls.
+    /// Under concurrent use, calls racing with each other may change the selection.
     pub fn inner(&self) -> &JsonRpcClient {
-        &self.rpc_endpoints[0]
+        &self.rpc_endpoints[self.current_endpoint_index()]
     }
 
-    /// Internal mutable reference to the primary [`JsonRpcClient`] that is utilized for all RPC calls.
+    /// Internal mutable reference to the most recently selected [`JsonRpcClient`] used for
+    /// RPC calls. Under concurrent use, calls racing with each other may change the selection.
     pub fn inner_mut(&mut self) -> &mut JsonRpcClient {
-        &mut self.rpc_endpoints[0]
+        let idx = self.current_endpoint_idx.load(Ordering::SeqCst);
+        &mut self.rpc_endpoints[idx]
     }
 
     /// References to all the [`JsonRpcClient`]s, where requests fail over to the next
@@ -108,9 +115,22 @@ impl Client {
         &self.rpc_endpoints
     }
 
-    /// The RPC address the client is connected to, of the primary endpoint.
+    /// The most recently selected RPC endpoint. Under concurrent use, calls racing with
+    /// each other may change the selection.
+    pub fn current_endpoint(&self) -> &JsonRpcClient {
+        &self.rpc_endpoints[self.current_endpoint_index()]
+    }
+
+    /// Index of the most recently selected RPC endpoint. Under concurrent use, calls
+    /// racing with each other may change the selection.
+    pub fn current_endpoint_index(&self) -> usize {
+        self.current_endpoint_idx.load(Ordering::SeqCst)
+    }
+
+    /// The RPC address of the most recently selected endpoint. Under concurrent use, calls
+    /// racing with each other may change the selection.
     pub fn rpc_addr(&self) -> String {
-        self.rpc_endpoints[0].server_addr().into()
+        self.current_endpoint().server_addr().into()
     }
 
     /// Call a JSON-RPC method with the network, retrying on retryable errors and
@@ -128,10 +148,21 @@ impl Client {
         C: Fn(&JsonRpcError<M::Error>) -> bool + Send + Sync,
     {
         let mut last_err = None;
-        for client in &self.rpc_endpoints {
+        let start = self.current_endpoint_index();
+        let endpoint_count = self.rpc_endpoints.len();
+        for offset in 0..endpoint_count {
+            let idx = (start + offset) % endpoint_count;
+            let client = &self.rpc_endpoints[idx];
+            // Record each failover so clones and subsequent calls start here.
+            if offset > 0 {
+                self.current_endpoint_idx.store(idx, Ordering::SeqCst);
+            }
             for _ in 0..RETRIES_PER_ENDPOINT {
                 match client.call(method).await {
-                    Ok(response) => return Ok(response),
+                    Ok(response) => {
+                        self.current_endpoint_idx.store(idx, Ordering::SeqCst);
+                        return Ok(response);
+                    }
                     Err(err) if is_critical(&err) => return Err(err),
                     Err(err) => {
                         last_err = Some(err);
@@ -140,6 +171,7 @@ impl Client {
                 }
             }
         }
+        // The index now points at the last endpoint attempted.
         Err(last_err.expect("at least one endpoint is required"))
     }
 
