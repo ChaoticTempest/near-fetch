@@ -47,6 +47,9 @@ pub mod result;
 /// Signing helpers, including NEP-413 off-chain message support.
 pub mod signer;
 
+#[cfg(test)]
+mod testkit;
+
 use crate::error::Result;
 use crate::ops::RetryableTransaction;
 use crate::signer::SignerExt;
@@ -780,151 +783,19 @@ async fn fetch_nonce(
 mod tests {
     use super::*;
     use crate::signer::ExposeAccountId;
-    use mockito::Server;
-    use near_crypto::{InMemorySigner, KeyType, SecretKey, Signature};
-    use near_jsonrpc_client::errors::{
-        JsonRpcServerResponseStatusError, JsonRpcTransportRecvError, RpcTransportError,
+    use crate::testkit::{
+        access_key_result, block_result, block_result_with_hash, final_outcome, full_access,
+        healthy_mock, in_memory_signer, invalid_nonce_tx_error, jsonrpc_client, jsonrpc_error_body,
+        jsonrpc_ok, slow_mock, timeout_mock, timeout_mock_with_attempts, transport_error,
+        tx_pending_result, tx_result, wrong_kind_query_result,
     };
+    use mockito::Server;
+    use near_jsonrpc_client::errors::JsonRpcServerResponseStatusError;
     use near_jsonrpc_client::methods::health::RpcHealthRequest;
-    use near_jsonrpc_primitives::message::Message;
     use near_jsonrpc_primitives::types::query::RpcQueryError;
     use near_primitives::errors::InvalidTxError;
-    use near_primitives::types::{BlockReference, Gas, ShardId};
-    use near_primitives::views::{
-        AccessKeyPermissionView, BlockHeaderView, BlockView, ExecutionOutcomeView,
-        ExecutionOutcomeWithIdView, FinalExecutionOutcomeWithReceiptView, SignedTransactionView,
-    };
-    use near_token::NearToken;
-
-    fn jsonrpc_client(addr: &str) -> JsonRpcClient {
-        JsonRpcClient::new_client().connect(addr)
-    }
-
-    fn jsonrpc_ok(result: serde_json::Value) -> Vec<u8> {
-        serde_json::json!({"jsonrpc": "2.0", "result": result, "id": 1})
-            .to_string()
-            .into_bytes()
-    }
-
-    fn access_key_result(nonce: u64, permission: serde_json::Value) -> serde_json::Value {
-        serde_json::json!({
-            "nonce": nonce,
-            "permission": permission,
-            "block_height": 10,
-            "block_hash": "11111111111111111111111111111111",
-        })
-    }
-
-    fn full_access() -> serde_json::Value {
-        serde_json::Value::String("FullAccess".into())
-    }
-
-    fn block_result() -> serde_json::Value {
-        serde_json::to_value(BlockView {
-            author: "alice.near".parse().unwrap(),
-            header: BlockHeaderView::default(),
-            chunks: vec![],
-        })
-        .unwrap()
-    }
-
-    fn block_result_with_hash(hash: CryptoHash) -> serde_json::Value {
-        let mut block: BlockView = serde_json::from_value(block_result()).unwrap();
-        block.header.hash = hash;
-        block.header.height = 10;
-        serde_json::to_value(block).unwrap()
-    }
-
-    fn wrong_kind_query_result() -> serde_json::Value {
-        serde_json::json!({
-            "result": [],
-            "logs": [],
-            "block_height": 1,
-            "block_hash": "11111111111111111111111111111111",
-        })
-    }
-
-    fn outcome_with_id(status: ExecutionStatusView) -> ExecutionOutcomeWithIdView {
-        ExecutionOutcomeWithIdView {
-            proof: vec![],
-            block_hash: CryptoHash::default(),
-            id: CryptoHash::default(),
-            outcome: ExecutionOutcomeView {
-                logs: vec![],
-                receipt_ids: vec![],
-                gas_burnt: Gas::from_gas(1),
-                tokens_burnt: NearToken::ZERO,
-                executor_id: "alice.near".parse().unwrap(),
-                status,
-                metadata: Default::default(),
-            },
-        }
-    }
-
-    fn outcome(
-        status: FinalExecutionStatus,
-        transaction_status: ExecutionStatusView,
-        receipts: Vec<ExecutionStatusView>,
-    ) -> FinalExecutionOutcomeView {
-        FinalExecutionOutcomeView {
-            status,
-            transaction: SignedTransactionView {
-                signer_id: "alice.near".parse().unwrap(),
-                public_key: PublicKey::empty(KeyType::ED25519),
-                nonce: 1,
-                receiver_id: "bob.near".parse().unwrap(),
-                actions: vec![],
-                _priority_fee: 0,
-                signature: Signature::from_parts(KeyType::ED25519, &[0u8; 64]).unwrap(),
-                hash: CryptoHash::default(),
-                nonce_index: None,
-                nonce_mode: None,
-            },
-            transaction_outcome: outcome_with_id(transaction_status),
-            receipts_outcome: receipts.into_iter().map(outcome_with_id).collect(),
-        }
-    }
-
-    fn tx_result(
-        status: FinalExecutionStatus,
-        transaction_status: ExecutionStatusView,
-        receipts: Vec<ExecutionStatusView>,
-        finality: TxExecutionStatus,
-    ) -> serde_json::Value {
-        serde_json::to_value(RpcTransactionResponse {
-            final_execution_outcome: Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(
-                outcome(status, transaction_status, receipts),
-            )),
-            final_execution_status: finality,
-        })
-        .unwrap()
-    }
-
-    fn tx_pending_result(finality: TxExecutionStatus) -> serde_json::Value {
-        serde_json::to_value(RpcTransactionResponse {
-            final_execution_outcome: None,
-            final_execution_status: finality,
-        })
-        .unwrap()
-    }
-
-    fn failure() -> TxExecutionError {
-        TxExecutionError::InvalidTxError(InvalidTxError::InvalidNonce {
-            tx_nonce: 1,
-            ak_nonce: 2,
-        })
-    }
-
-    fn test_signer(id: &str) -> InMemorySigner {
-        let account_id: AccountId = id.parse().unwrap();
-        let secret_key = SecretKey::from_random(KeyType::ED25519);
-        let public_key = secret_key.public_key();
-        InMemorySigner {
-            account_id,
-            public_key,
-            secret_key,
-        }
-    }
+    use near_primitives::types::{BlockReference, ShardId};
+    use near_primitives::views::{AccessKeyPermissionView, FinalExecutionOutcomeWithReceiptView};
 
     /// A single mock endpoint that dispatches by JSON-RPC method name.
     async fn method_server(
@@ -1001,22 +872,12 @@ mod tests {
         }
     }
 
-    fn tx_handler_error_body(err: RpcTransactionError) -> String {
-        let rpc_error: near_jsonrpc_primitives::errors::RpcError = err.into();
-        serde_json::to_string(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "error": rpc_error,
-            "id": 1,
-        }))
-        .unwrap()
-    }
-
     #[tokio::test]
     async fn status_timeout_is_retried_with_status_error_classifier() {
         let mut server = Server::new_async().await;
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
-        let timeout_body = tx_handler_error_body(RpcTransactionError::TimeoutError(None));
+        let timeout_body = jsonrpc_error_body(RpcTransactionError::TimeoutError(None));
         let success_body =
             r#"{"jsonrpc":"2.0","result":{"final_execution_status":"FINAL"},"id":1}"#.to_owned();
 
@@ -1053,7 +914,7 @@ mod tests {
     #[tokio::test]
     async fn critical_status_handler_error_is_not_retried() {
         let mut server = Server::new_async().await;
-        let body = tx_handler_error_body(RpcTransactionError::InvalidTransaction {
+        let body = jsonrpc_error_body(RpcTransactionError::InvalidTransaction {
             context: InvalidTxError::InvalidNonce {
                 tx_nonce: 1,
                 ak_nonce: 2,
@@ -1105,15 +966,6 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(client.current_endpoint_index(), 0);
         mock.assert_async().await;
-    }
-
-    fn transport_error<E>() -> JsonRpcError<E> {
-        JsonRpcError::TransportError(RpcTransportError::RecvError(
-            JsonRpcTransportRecvError::UnexpectedServerResponse(Box::new(Message::notification(
-                "test".into(),
-                serde_json::Value::Null,
-            ))),
-        ))
     }
 
     fn server_error<E>(err: JsonRpcServerError<E>) -> JsonRpcError<E> {
@@ -1210,30 +1062,6 @@ mod tests {
 
     // Endpoint setup and the shared selection index are exercised through real
     // mock-server failover, not by comparing two views of the same index.
-
-    async fn healthy_mock(server: &mut Server) -> mockito::Mock {
-        server
-            .mock("POST", "/")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"jsonrpc":"2.0","result":null,"id":1}"#)
-            .expect(1)
-            .create_async()
-            .await
-    }
-
-    async fn timeout_mock(server: &mut Server) -> mockito::Mock {
-        timeout_mock_with_attempts(server, 3).await
-    }
-
-    async fn timeout_mock_with_attempts(server: &mut Server, attempts: usize) -> mockito::Mock {
-        server
-            .mock("POST", "/")
-            .with_status(408)
-            .expect(attempts)
-            .create_async()
-            .await
-    }
 
     #[tokio::test]
     async fn builder_clients_fail_over_to_second_endpoint() {
@@ -1403,23 +1231,6 @@ mod tests {
         assert_eq!(client.poll_timeout(), Some(Duration::from_secs(5)));
     }
 
-    /// A mock endpoint that produces its response only after `delay`. Mockito
-    /// serves on its own thread/runtime, so this sleep does not block the
-    /// client's timer that enforces `request_timeout`.
-    async fn slow_mock(server: &mut Server, delay: Duration, attempts: usize) -> mockito::Mock {
-        server
-            .mock("POST", "/")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body_from_request(move |_| {
-                std::thread::sleep(delay);
-                jsonrpc_ok(serde_json::Value::Null)
-            })
-            .expect(attempts)
-            .create_async()
-            .await
-    }
-
     #[tokio::test]
     async fn request_timeout_expires_every_attempt() {
         let mut server = Server::new_async().await;
@@ -1584,7 +1395,7 @@ mod tests {
         let expected_hashes: Vec<_> = (0..2).map(|n| CryptoHash::hash_bytes(&[n])).collect();
         let client = Client::from_client(jsonrpc_client(&server.url()));
         let account: AccountId = "alice.near".parse().unwrap();
-        let signer = test_signer("alice.near");
+        let signer = in_memory_signer("alice.near");
         let pk = SignerExt::public_key(&signer);
         let cache_key = (account.clone(), pk.clone());
 
@@ -1640,7 +1451,7 @@ mod tests {
 
         let client = Client::from_client(jsonrpc_client(&server.url()));
         let account: AccountId = "alice.near".parse().unwrap();
-        let signer = test_signer("alice.near");
+        let signer = in_memory_signer("alice.near");
         let pk = SignerExt::public_key(&signer);
         let cache_key = (account.clone(), pk.clone());
 
@@ -1677,16 +1488,16 @@ mod tests {
 
         let client = Client::from_client(jsonrpc_client(&server.url()));
         let account: AccountId = "alice.near".parse().unwrap();
-        let pk = SignerExt::public_key(&test_signer("alice.near"));
+        let pk = SignerExt::public_key(&in_memory_signer("alice.near"));
         let cache_key = (account.clone(), pk.clone());
         assert_eq!(client.fetch_nonce(&account, &pk).await.unwrap().0, 6);
 
         let response = RpcTransactionResponse {
             final_execution_outcome: Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(
-                outcome(
+                final_outcome(
                     FinalExecutionStatus::SuccessValue(Vec::new()),
                     ExecutionStatusView::Unknown,
-                    vec![ExecutionStatusView::Failure(failure())],
+                    vec![ExecutionStatusView::Failure(invalid_nonce_tx_error())],
                 ),
             )),
             final_execution_status: TxExecutionStatus::Final,
@@ -1727,7 +1538,7 @@ mod tests {
 
         let client = Client::from_client(jsonrpc_client(&server.url()));
         let account: AccountId = "alice.near".parse().unwrap();
-        let pk = SignerExt::public_key(&test_signer("alice.near"));
+        let pk = SignerExt::public_key(&in_memory_signer("alice.near"));
         let cache_key = (account.clone(), pk.clone());
         assert_eq!(client.fetch_nonce(&account, &pk).await.unwrap().0, 6);
 
@@ -1740,7 +1551,7 @@ mod tests {
         });
         let response = RpcTransactionResponse {
             final_execution_outcome: Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(
-                outcome(
+                final_outcome(
                     FinalExecutionStatus::SuccessValue(Vec::new()),
                     ExecutionStatusView::SuccessValue(Vec::new()),
                     vec![ExecutionStatusView::Failure(delegate_invalid)],
@@ -1763,7 +1574,7 @@ mod tests {
         });
         let response = RpcTransactionResponse {
             final_execution_outcome: Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(
-                outcome(
+                final_outcome(
                     FinalExecutionStatus::SuccessValue(Vec::new()),
                     ExecutionStatusView::SuccessValue(Vec::new()),
                     vec![ExecutionStatusView::Failure(unrelated)],
@@ -1788,11 +1599,11 @@ mod tests {
 
         let response = RpcTransactionResponse {
             final_execution_outcome: Some(FinalExecutionOutcomeViewEnum::FinalExecutionOutcome(
-                outcome(
-                    FinalExecutionStatus::Failure(failure()),
-                    ExecutionStatusView::Failure(failure()),
+                final_outcome(
+                    FinalExecutionStatus::Failure(invalid_nonce_tx_error()),
+                    ExecutionStatusView::Failure(invalid_nonce_tx_error()),
                     vec![
-                        ExecutionStatusView::Failure(failure()),
+                        ExecutionStatusView::Failure(invalid_nonce_tx_error()),
                         ExecutionStatusView::SuccessValue(Vec::new()),
                     ],
                 ),
@@ -1805,10 +1616,10 @@ mod tests {
             final_execution_outcome: Some(
                 FinalExecutionOutcomeViewEnum::FinalExecutionOutcomeWithReceipt(
                     FinalExecutionOutcomeWithReceiptView {
-                        final_outcome: outcome(
-                            FinalExecutionStatus::Failure(failure()),
+                        final_outcome: final_outcome(
+                            FinalExecutionStatus::Failure(invalid_nonce_tx_error()),
                             ExecutionStatusView::SuccessValue(Vec::new()),
-                            vec![ExecutionStatusView::Failure(failure())],
+                            vec![ExecutionStatusView::Failure(invalid_nonce_tx_error())],
                         ),
                         receipts: vec![],
                     },
@@ -1829,7 +1640,7 @@ mod tests {
         .await;
         let client = Client::from_client(jsonrpc_client(&server.url()));
         let account: AccountId = "alice.near".parse().unwrap();
-        let pk = SignerExt::public_key(&test_signer("alice.near"));
+        let pk = SignerExt::public_key(&in_memory_signer("alice.near"));
         let (view, hash, height) = client.access_key(&account, &pk).await.unwrap();
         assert_eq!(view.nonce, 5);
         assert_eq!(view.permission, AccessKeyPermissionView::FullAccess);
@@ -1880,7 +1691,7 @@ mod tests {
             .create_async()
             .await;
         let client = Client::from_client(jsonrpc_client(&server.url()));
-        let signer = test_signer("alice.near");
+        let signer = in_memory_signer("alice.near");
         let receiver: AccountId = "bob.near".parse().unwrap();
         let outcome = client
             .send_tx_once(&signer, &receiver, vec![], TxExecutionStatus::Final)
@@ -1918,7 +1729,7 @@ mod tests {
     #[tokio::test]
     async fn send_tx_once_handler_error_propagates_and_invalidates_cache() {
         let mut server = Server::new_async().await;
-        let error_body = tx_handler_error_body(RpcTransactionError::InvalidTransaction {
+        let error_body = jsonrpc_error_body(RpcTransactionError::InvalidTransaction {
             context: InvalidTxError::InvalidNonce {
                 tx_nonce: 6,
                 ak_nonce: 5,
@@ -1942,7 +1753,7 @@ mod tests {
             .await;
 
         let client = Client::from_client(jsonrpc_client(&server.url()));
-        let signer = test_signer("alice.near");
+        let signer = in_memory_signer("alice.near");
         let pk = SignerExt::public_key(&signer);
         let receiver: AccountId = "bob.near".parse().unwrap();
         let account = signer.account_id().clone();
@@ -1966,7 +1777,7 @@ mod tests {
         )
         .await;
         let client = Client::from_client(jsonrpc_client(&server.url()));
-        let signer = test_signer("alice.near");
+        let signer = in_memory_signer("alice.near");
         let receiver: AccountId = "bob.near".parse().unwrap();
         let hash = client
             .send_tx_async(&signer, &receiver, vec![])
@@ -1975,7 +1786,7 @@ mod tests {
         assert_ne!(hash, CryptoHash::default());
 
         let mut server = Server::new_async().await;
-        let error_body = tx_handler_error_body(RpcTransactionError::InvalidTransaction {
+        let error_body = jsonrpc_error_body(RpcTransactionError::InvalidTransaction {
             context: InvalidTxError::InvalidNonce {
                 tx_nonce: 6,
                 ak_nonce: 5,
