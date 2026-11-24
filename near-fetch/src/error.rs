@@ -118,6 +118,30 @@ mod tests {
         })
     }
 
+    #[derive(Debug)]
+    struct SourceLeaf(&'static str);
+
+    impl std::fmt::Display for SourceLeaf {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl std::error::Error for SourceLeaf {}
+
+    #[derive(Debug)]
+    struct SourceWrapper(SourceLeaf);
+
+    impl std::fmt::Display for SourceWrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("wrapper")
+        }
+    }
+    impl std::error::Error for SourceWrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
     #[test]
     fn from_jsonrpc_errors_wrap_in_the_matching_variant() {
         assert!(matches!(
@@ -207,12 +231,24 @@ mod tests {
     }
 
     #[test]
-    fn source_is_available_on_every_variant() {
+    fn source_is_present_only_for_transparent_wrappers() {
         use general_purpose::STANDARD;
 
-        // Transparent variants delegate `source` to the wrapped error; leaf
-        // errors such as `serde_json::Error` have no source of their own.
-        let errors = vec![
+        // A transparent variant must expose a source when its inner error has
+        // one; the message must survive the delegation unchanged.
+        let nested = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            SourceWrapper(SourceLeaf("inner disk failure")),
+        ));
+        let source = nested
+            .source()
+            .unwrap_or_else(|| panic!("{nested:?} must expose its wrapped source"));
+        assert_eq!(source.to_string(), "inner disk failure");
+
+        // Errors whose inner error is itself a leaf expose no source. The
+        // transport errors chain down to `UnexpectedServerResponse`, which has
+        // no source of its own.
+        let leaves = vec![
             Error::from(transport_error::<RpcBlockError>()),
             Error::from(transport_error::<RpcQueryError>()),
             Error::from(transport_error::<RpcChunkError>()),
@@ -228,8 +264,12 @@ mod tests {
             Error::Io(std::io::Error::other("disk")),
             Error::InvalidArgs("bad"),
         ];
-        for error in errors {
-            let _ = error.source();
+        for error in leaves {
+            assert!(
+                error.source().is_none(),
+                "{error:?} unexpectedly has a source: {:?}",
+                error.source()
+            );
         }
     }
 }
