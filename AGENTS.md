@@ -91,8 +91,9 @@ this pattern and documenting it here.
   `chore/*`, and `docs/*`. The local stack is ordered
   `feat/nep413-signing` → `feat/rpc-failover` → `feat/query-combinators` →
   `feat/retry-timeouts` → `chore/edition-2024` → `test/feature-coverage` →
-  `docs/rustdoc`; each branch is an ancestor of the next and PRs are merged
-  bottom-up. Base a new branch on the tip of the stack it extends.
+  `docs/rustdoc` → `docs/readme-agents`; each branch is an ancestor of the next
+  and PRs are merged bottom-up. Base a new branch on the tip of the stack it
+  extends.
 - Version-bump branches use `release/<version>` (for example `release/0.13`)
   and version commits use `release: X` (for example `release: 0.13.0`). The
   `0.13.0` bump exists only on `release/0.13`; the crate on this stack is
