@@ -481,7 +481,7 @@ impl<'a> std::future::IntoFuture for RetryableTransaction<'a> {
             };
 
             if let Some(strategy) = self.strategy {
-                Retry::start(strategy, action).await
+                Retry::spawn(strategy, action).await
             } else {
                 action().await
             }
@@ -555,7 +555,7 @@ impl AsyncTransactionStatus {
                     )) => Ok(Poll::Pending),
 
                     JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
-                        RpcTransactionError::TimeoutError,
+                        RpcTransactionError::TimeoutError(_),
                     )) => Ok(Poll::Pending),
                     _ => Err(Error::RpcTransactionError(err)),
                 },
