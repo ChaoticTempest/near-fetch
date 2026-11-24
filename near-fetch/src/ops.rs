@@ -432,8 +432,11 @@ impl Transaction<'_> {
         self
     }
 
-    /// Retry this transactions if it fails. This will retry the transaction with exponential
-    /// backoff.
+    /// Retry this transaction if it fails, using exponential backoff with jitter.
+    ///
+    /// `base_millis` is the initial delay and `max_retries` caps the number of
+    /// attempts after the first one. This replaces any retry strategy previously
+    /// set with [`Transaction::retry`].
     pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
         self.retry(
             ExponentialBackoff::from_millis(base_millis)
@@ -475,8 +478,11 @@ pub struct RetryableTransaction<'a> {
 }
 
 impl RetryableTransaction<'_> {
-    /// Retry this transactions if it fails. This will retry the transaction with exponential
-    /// backoff.
+    /// Retry this transaction if it fails, using exponential backoff with jitter.
+    ///
+    /// `base_millis` is the initial delay and `max_retries` caps the number of
+    /// attempts after the first one. This replaces any retry strategy previously
+    /// set with [`RetryableTransaction::retry`].
     pub fn retry_exponential(self, base_millis: u64, max_retries: usize) -> Self {
         self.retry(
             ExponentialBackoff::from_millis(base_millis)
