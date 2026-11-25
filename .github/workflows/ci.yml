@@ -13,7 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt, llvm-tools-preview
-      - uses: extractions/setup-just@v4
+      - uses: taiki-e/install-action@just
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
       - run: just ci
@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95
-      - uses: extractions/setup-just@v4
+      - uses: taiki-e/install-action@just
       - uses: Swatinem/rust-cache@v2
       - name: Verify MSRV-compatible dependency resolution
         run: |
@@ -80,7 +80,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: extractions/setup-just@v4
+      - uses: taiki-e/install-action@just
       - uses: Swatinem/rust-cache@v2
       - run: just features
 
@@ -100,7 +100,7 @@ jobs:
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: extractions/setup-just@v4
+      - uses: taiki-e/install-action@just
       - uses: Swatinem/rust-cache@v2
 
       - name: Extract expected version from PR title
